@@ -1,0 +1,109 @@
+/* Academic Wiki — Entity Type Visual Indicators */
+
+/* Paper pages: red left border */
+.markdown-preview-view [src*="papers/"]::before,
+.workspace-leaf-content[data-type="markdown"] .frontmatter-container ~ .markdown-preview-section:has(h2:first-child) {
+  border-left: none;
+}
+
+/* Frontmatter type badges */
+.metadata-property[data-property-key="type"] .metadata-property-value {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+/* Entity type badges via CSS attribute selector on frontmatter */
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="paper"] {
+  background-color: #e74c3c22;
+  color: #e74c3c;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="concept"] {
+  background-color: #27ae6022;
+  color: #27ae60;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="method"] {
+  background-color: #2980b922;
+  color: #2980b9;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="dataset"] {
+  background-color: #f39c1222;
+  color: #f39c12;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="author"] {
+  background-color: #66339922;
+  color: #663399;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="survey"] {
+  background-color: #00bcd422;
+  color: #00bcd4;
+}
+
+.metadata-container .metadata-property[data-property-key="type"] .metadata-property-value[data-value="comparison"] {
+  background-color: #ff660022;
+  color: #ff6600;
+}
+
+/* Status indicators */
+.metadata-container .metadata-property[data-property-key="status"] .metadata-property-value[data-value="complete"] {
+  color: #27ae60;
+}
+
+.metadata-container .metadata-property[data-property-key="status"] .metadata-property-value[data-value="in_progress"] {
+  color: #f39c12;
+}
+
+.metadata-container .metadata-property[data-property-key="status"] .metadata-property-value[data-value="stub"] {
+  color: #95a5a6;
+}
+
+/* Confidence indicators */
+.metadata-container .metadata-property[data-property-key="confidence"] .metadata-property-value[data-value="high"] {
+  color: #27ae60;
+}
+
+.metadata-container .metadata-property[data-property-key="confidence"] .metadata-property-value[data-value="medium"] {
+  color: #f39c12;
+}
+
+.metadata-container .metadata-property[data-property-key="confidence"] .metadata-property-value[data-value="low"] {
+  color: #e74c3c;
+}
+
+/* Source citation blocks */
+blockquote:has(> p:first-child > strong:first-child) {
+  border-left: 3px solid var(--interactive-accent);
+  background-color: var(--background-secondary);
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+
+/* Agent judgment blocks */
+blockquote:has(> p:first-child > em:first-child) {
+  border-left: 3px dashed var(--text-muted);
+  font-style: normal;
+}
+
+/* Table styling for wiki tables */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+table th {
+  background-color: var(--background-secondary);
+  font-weight: 600;
+}
+
+/* Section headers in wiki pages */
+h2 {
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 4px;
+  margin-top: 1.5em;
+}

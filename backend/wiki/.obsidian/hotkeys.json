@@ -1,0 +1,26 @@
+{
+  "templater-obsidian:templates": [
+    {
+      "modifiers": ["Ctrl"],
+      "key": "t"
+    }
+  ],
+  "editor:toggle-source": [
+    {
+      "modifiers": ["Ctrl"],
+      "key": "e"
+    }
+  ],
+  "app:go-back": [
+    {
+      "modifiers": ["Alt"],
+      "key": "ArrowLeft"
+    }
+  ],
+  "app:go-forward": [
+    {
+      "modifiers": ["Alt"],
+      "key": "ArrowRight"
+    }
+  ]
+}

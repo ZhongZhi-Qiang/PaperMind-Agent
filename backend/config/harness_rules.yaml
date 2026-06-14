@@ -1,0 +1,36 @@
+# Harness Security Rules Configuration
+# 热加载：修改此文件无需重启服务，下次工具调用自动生效
+
+security:
+  # 敏感文件保护（glob 模式匹配）
+  protected_paths:
+    - "**/.env"
+    - "**/.env.*"
+    - "**/credentials*"
+    - "**/secrets*"
+    - "**/*.key"
+    - "**/*.pem"
+    - "**/.git/config"
+    - "**/.ssh/*"
+
+  # 危险命令黑名单（正则匹配）
+  dangerous_commands:
+    - pattern: "rm\\s+-rf"
+      message: "禁止递归删除操作"
+    - pattern: "DROP\\s+TABLE"
+      message: "禁止删除数据库表"
+    - pattern: ">\\s*/dev/sd"
+      message: "禁止直接写入磁盘设备"
+    - pattern: "mkfs\\."
+      message: "禁止格式化磁盘"
+    - pattern: ":(){ :\\|:& };:"
+      message: "检测到 fork 炸弹"
+
+  # 自定义规则
+  custom_rules: []
+  # 示例：
+  # - name: "禁止访问系统密码文件"
+  #   tool: "terminal"
+  #   condition:
+  #     command_contains: "/etc/shadow"
+  #   message: "禁止访问系统密码文件"

@@ -1,0 +1,68 @@
+# Wiki 预定义标签分类表
+# 用于 paper 页面的 tags 字段，控制 survey 触发条件（同 tag 论文 ≥ 3 篇）
+# 新增领域时在末尾加一行即可
+
+taxonomy:
+  - id: agent-architecture
+    label: Agent Architecture
+    keywords: [agent, ReAct, plan-execute, tool-use, function-calling, agentic]
+
+  - id: memory-systems
+    label: Memory Systems
+    keywords: [memory, long-term memory, short-term memory, context compression, context management, offload]
+
+  - id: retrieval-augmented
+    label: Retrieval-Augmented Generation
+    keywords: [RAG, retrieval, dense retrieval, sparse retrieval, hybrid search, knowledge retrieval]
+
+  - id: multi-agent
+    label: Multi-Agent Systems
+    keywords: [multi-agent, coordination, collaboration, communication, distributed agents]
+
+  - id: self-evolution
+    label: Self-Evolution & Learning
+    keywords: [self-improvement, self-evolving, adaptation, online learning, experience learning]
+
+  - id: reasoning-planning
+    label: Reasoning & Planning
+    keywords: [reasoning, planning, chain-of-thought, tree-of-thought, decomposition, reflection]
+
+  - id: evaluation-benchmark
+    label: Evaluation & Benchmarks
+    keywords: [benchmark, evaluation, metrics, comparison, reproducibility]
+
+  - id: safety-alignment
+    label: Safety & Alignment
+    keywords: [safety, alignment, guardrails, hallucination, factuality, trustworthiness, red-team]
+
+  - id: training-optimization
+    label: Training & Optimization
+    keywords: [RLHF, fine-tuning, distillation, reinforcement learning, training, optimization, reward model]
+
+  - id: knowledge-management
+    label: Knowledge Management
+    keywords: [knowledge graph, ontology, wiki, structured knowledge, knowledge representation]
+
+  - id: nlp-tasks
+    label: NLP Tasks
+    keywords: [summarization, translation, question-answering, information extraction, text classification]
+
+  - id: efficiency-scalability
+    label: Efficiency & Scalability
+    keywords: [efficiency, latency, throughput, scaling, inference optimization, quantization, pruning]
+
+  - id: web-interaction
+    label: Web & GUI Interaction
+    keywords: [web agent, GUI agent, browser, web navigation, web scraping, UI automation]
+
+  - id: code-generation
+    label: Code Generation
+    keywords: [code generation, programming, software engineering, code review, debugging]
+
+  - id: robotics-embodied
+    label: Robotics & Embodied AI
+    keywords: [robotics, embodied, manipulation, navigation, simulation, physical agent]
+
+  - id: finance-domain
+    label: Finance & Domain-Specific
+    keywords: [finance, trading, market, domain-specific, vertical agent]

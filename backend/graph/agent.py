@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import logging
+
+from config import get_settings, runtime_config
+from graph.context import RequestContext
+from graph.agent_factory import build_agent_config, create_agent_from_config
+from service.session_manager import SessionManager
+from graph.llm import build_llm_config_from_settings, get_llm
+from tools import get_all_tools
+from memory_module_v3.config import get_memory_backend
+
+# v3 memory — lazy imports to avoid overhead when not in use
+_v3_initialized = False
+_v3_recorder = None
+_v3_pipeline = None
+_v3_recall_service = None
+_v3_offload = None
+# Shared dict for cross-module access (tools/__init__.py reads from here)
+_v3_services: dict[str, Any] = {}
+
+logger = logging.getLogger(__name__)
+
+
+def _stringify_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    return str(content or "")
+
+
+class AgentManager:
+    def __init__(self) -> None:
+        self.base_dir: Path | None = None
+        self.session_manager: SessionManager | None = None
+        self.tools = []
+
+    def initialize(self, base_dir: Path) -> None:
+        self.base_dir = base_dir
+        self.session_manager = SessionManager(base_dir)
+        self.tools = get_all_tools(base_dir)
+
+    # 用于generate_title()和summarize_history()
+    def _build_chat_model(self):
+        settings = get_settings()
+        llm_config = build_llm_config_from_settings(settings, temperature=0.0, streaming=False)
+        return get_llm(llm_config)
+
+    def _build_agent(self):
+        if self.base_dir is None:
+            raise RuntimeError("AgentManager is not initialized")
+        config = build_agent_config(
+            self.base_dir, self.tools, use_checkpointer=True
+        )
+        return create_agent_from_config(config)
+
+    def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for item in history:
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            messages.append({"role": role, "content": str(item.get("content", ""))})
+        return messages
+
+    async def astream(
+        self,
+        message: str,
+        history: list[dict[str, Any]],
+        context: RequestContext | None = None,
+    ):
+        if self.base_dir is None:
+            raise RuntimeError("AgentManager is not initialized")
+
+        memory_backend = get_memory_backend()
+        turn_messages: list[dict[str, str]] = []
+        session_id = context.thread_id if context else "default"
+
+        # --- v3 auto-recall ---
+        if memory_backend == "v3":
+            await _init_v3_once()
+            # Register v3 tools if not already present (init may have completed after initialize())
+            if _v3_recall_service and not any(t.name == "search_memory_v3" for t in self.tools):
+                from memory_module_v3.config import get_memory_v3_config
+                cfg = get_memory_v3_config()
+                if cfg.inject_mode == "tool":
+                    from memory_module_v3.integrations.tools import create_search_memory_v3_tool
+                    self.tools.append(create_search_memory_v3_tool(_v3_recall_service))
+                    logger.info("Registered search_memory_v3 tool (deferred)")
+                if cfg.offload_enabled and _v3_offload:
+                    from memory_module_v3.integrations.tools import create_drill_down_tool
+                    self.tools.append(create_drill_down_tool(_v3_offload))
+                    logger.info("Registered drill_down tool (deferred)")
+            if _v3_recall_service:
+                from memory_module_v3.integrations.middleware import build_recall_context
+                try:
+                    recall_result = await _v3_recall_service.recall(message)
+                    ctx = build_recall_context(recall_result)
+                    if ctx.get("append_system_context"):
+                        turn_messages.append({"role": "system", "content": ctx["append_system_context"]})
+                    if ctx.get("prepend_context"):
+                        turn_messages.append({"role": "assistant", "content": ctx["prepend_context"]})
+                except Exception as v3_exc:
+                    logger.warning("Memory v3 auto-recall failed: %s", v3_exc)
+
+        turn_messages.append({"role": "user", "content": message})
+
+        agent = self._build_agent()
+        run_config: dict[str, Any] = {"configurable": {"thread_id": (context.thread_id if context else "")}}
+        if context and context.callbacks:
+            run_config["callbacks"] = context.callbacks
+        if not run_config["configurable"]["thread_id"]:
+            run_config["configurable"]["thread_id"] = "default"
+
+        final_content_parts: list[str] = []
+        last_ai_message = ""
+        pending_tools: dict[str, dict[str, str]] = {}
+        last_usage: dict[str, Any] | None = None
+
+        async for mode, payload in agent.astream(
+            {"messages": turn_messages},
+            stream_mode=["messages", "updates"],
+            config=run_config,
+            # stream_options={"include_usage": True}
+        ):
+            if mode == "messages":
+                chunk, metadata = payload
+                # 优先从 metadata 中读取 usage（LangGraph 在 include_usage=True 时会放在这里）
+                usage_candidate: Any = None
+                if isinstance(metadata, dict):
+                    usage_candidate = metadata.get("usage")
+                if isinstance(usage_candidate, dict):
+                    last_usage = usage_candidate
+
+                # 只转发主 agent 节点的 token；跳过 guardian middleware 等非 agent 节点的 LLM 输出
+                node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
+                if node is not None and node != "agent":
+                    continue
+
+                text = _stringify_content(getattr(chunk, "content", ""))
+                if text:
+                    final_content_parts.append(text)
+                    yield {"type": "token", "content": text}
+                continue
+
+            if mode != "updates":
+                continue
+
+            for update in payload.values():
+                if not update:
+                    continue
+                for agent_message in update.get("messages", []):
+                    message_type = getattr(agent_message, "type", "")
+                    tool_calls = getattr(agent_message, "tool_calls", []) or []
+
+                    if message_type == "ai" and not tool_calls:
+                        candidate = _stringify_content(getattr(agent_message, "content", ""))
+                        if candidate:
+                            last_ai_message = candidate
+
+                    if tool_calls:
+                        for tool_call in tool_calls:
+                            call_id = str(tool_call.get("id") or tool_call.get("name"))
+                            tool_name = str(tool_call.get("name", "tool"))
+                            tool_args = tool_call.get("args", "")
+                            if not isinstance(tool_args, str):
+                                tool_args = json.dumps(tool_args, ensure_ascii=False)
+                            pending_tools[call_id] = {
+                                "tool": tool_name,
+                                "input": str(tool_args),
+                            }
+                            yield {
+                                "type": "tool_start",
+                                "tool": tool_name,
+                                "input": str(tool_args),
+                            }
+
+                    if message_type == "tool":
+                        tool_call_id = str(getattr(agent_message, "tool_call_id", ""))
+                        pending = pending_tools.pop(
+                            tool_call_id,
+                            {"tool": getattr(agent_message, "name", "tool"), "input": ""},
+                        )
+                        output = _stringify_content(getattr(agent_message, "content", ""))
+
+                        yield {
+                            "type": "tool_end",
+                            "tool": pending["tool"],
+                            "output": output,
+                        }
+                        yield {"type": "new_response"}
+
+        final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
+
+        # --- v3 auto-capture ---
+        if memory_backend == "v3" and _v3_recorder and _v3_pipeline:
+            try:
+                user_id, asst_id = await _v3_recorder.capture(
+                    session_id, message, final_content,
+                )
+                await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
+            except Exception as v3_cap_exc:
+                logger.warning("Memory v3 auto-capture failed: %s", v3_cap_exc)
+        # 若 LLM 返回了 usage，且本次调用启用了 Langfuse，则在结束时补充 usage 信息，方便在 Langfuse 中显示 tokens
+        if last_usage and context and context.callbacks:
+            try:
+                from langfuse import get_client
+                from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+
+                langfuse_handler: Any | None = None
+                for cb in context.callbacks:
+                    if isinstance(cb, LangfuseCallbackHandler):
+                        langfuse_handler = cb
+                        break
+                trace_id = getattr(langfuse_handler, "last_trace_id", None) if langfuse_handler else None
+                if trace_id:
+                    client = get_client()
+                    client.trace.update(
+                        id=trace_id,
+                        usage={
+                            "input": last_usage.get("prompt_tokens", 0),
+                            "output": last_usage.get("completion_tokens", 0),
+                            "total": last_usage.get("total_tokens", 0),
+                        },
+                    )
+            except Exception as exc:
+                print("[langfuse] 更新 usage 失败：", repr(exc))
+        yield {"type": "done", "content": final_content}
+
+    async def generate_title(self, first_user_message: str) -> str:
+        prompt = (
+            "请根据用户的第一条消息生成一个中文会话标题。"
+            "要求不超过 10 个汉字，不要带引号，不要解释。"
+        )
+        try:
+            response = await self._build_chat_model().ainvoke(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": first_user_message},
+                ]
+            )
+            title = _stringify_content(getattr(response, "content", "")).strip()
+            return title[:10] or "新会话"
+        except Exception:
+            return (first_user_message.strip() or "新会话")[:10]
+
+    async def summarize_history(self, messages: list[dict[str, Any]]) -> str:
+        prompt = (
+            "请将以下对话压缩成中文摘要，控制在 500 字以内。"
+            "重点保留用户目标、已完成步骤、重要结论和未解决事项。"
+        )
+        lines: list[str] = []
+        for item in messages:
+            role = item.get("role", "assistant")
+            content = str(item.get("content", "") or "")
+            if content:
+                lines.append(f"{role}: {content}")
+        transcript = "\n".join(lines)
+
+        try:
+            response = await self._build_chat_model().ainvoke(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": transcript},
+                ]
+            )
+            summary = _stringify_content(getattr(response, "content", "")).strip()
+            return summary[:500]
+        except Exception:
+            return transcript[:500]
+
+
+agent_manager = AgentManager()
+
+
+async def _init_v3_once():
+    """Lazy initialization of v3 memory system (called once on first v3 request)."""
+    global _v3_initialized, _v3_recorder, _v3_pipeline, _v3_recall_service, _v3_offload
+    if _v3_initialized:
+        return
+
+    try:
+        from memory_module_v3.storage.pg import ensure_schema
+        from memory_module_v3.storage.l0_repo import L0Repo
+        from memory_module_v3.storage.l1_repo import L1Repo
+        from memory_module_v3.storage.l2_repo import L2Repo, PipelineStateRepo, KVRepo
+        from memory_module_v3.capture.l0_recorder import L0Recorder
+        from memory_module_v3.pipeline.manager import PipelineManager
+        from memory_module_v3.retrieval.service import RecallService
+        from memory_module_v3.config import get_memory_v3_config
+
+        # Initialize schema
+        ensure_schema()
+
+        # Create repos
+        l0_repo = L0Repo()
+        l1_repo = L1Repo()
+        l2_repo = L2Repo()
+        pipeline_repo = PipelineStateRepo()
+        kv_repo = KVRepo()
+
+        # Build embedding function
+        settings = get_settings()
+        from graph.llm import build_embedding_config_from_settings, get_embedding_model
+        emb_config = build_embedding_config_from_settings(settings)
+        emb_model = get_embedding_model(emb_config)
+
+        async def embedding_fn(text: str) -> list[float]:
+            import asyncio
+            return await asyncio.to_thread(emb_model.embed_query, text)
+
+        # Build LLM function for extraction/dedup
+        llm_config = build_llm_config_from_settings(settings, temperature=0.0, streaming=False)
+        llm = get_llm(llm_config)
+
+        async def llm_fn(system: str, user: str) -> str:
+            import asyncio
+            response = await asyncio.to_thread(
+                llm.invoke,
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            )
+            content = getattr(response, "content", "")
+            return content if isinstance(content, str) else str(content)
+
+        config = get_memory_v3_config()
+
+        _v3_recorder = L0Recorder(l0_repo, embedding_fn)
+        _v3_pipeline = PipelineManager(
+            l0_repo, l1_repo, l2_repo, pipeline_repo, kv_repo,
+            llm_fn, embedding_fn, config,
+        )
+        _v3_recall_service = RecallService(l1_repo, l2_repo, kv_repo, embedding_fn, config)
+
+        # Symbolic offload (context compression)
+        if config.offload_enabled:
+            from memory_module_v3.offload.offload_manager import OffloadManager
+            _v3_offload = OffloadManager(
+                llm=llm,
+                data_dir=Path(settings.backend_dir) / "memory_module_v3" / "offload",
+                threshold=config.offload_threshold,
+                enabled=True,
+            )
+
+        # Store in shared dict for cross-module access (tools/__init__.py)
+        _v3_services["recall_service"] = _v3_recall_service
+        _v3_services["offload"] = _v3_offload
+
+        _v3_initialized = True
+        logger.info("memory_module_v3 initialized successfully")
+
+    except Exception as exc:
+        logger.error("Failed to initialize memory_module_v3: %s", exc)
+        _v3_initialized = True  # Don't retry on every call
