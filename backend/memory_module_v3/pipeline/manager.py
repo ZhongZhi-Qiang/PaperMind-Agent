@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
 from ..config import MemoryV3Config, get_memory_v3_config
-from ..storage.l0_repo import L0Repo
+from ..storage.l0_file_repo import L0FileRepo
 from ..storage.l1_repo import L1Repo
-from ..storage.l2_repo import L2Repo, PipelineStateRepo, KVRepo
+from ..storage.l2_repo import PipelineStateRepo
+from ..storage.l2_file_repo import L2FileRepo
+from ..storage.l3_file_repo import L3FileRepo
 from ..extract.l1_extractor import L1Extractor
 from ..extract.l1_dedup import L1Deduplicator
 from .scheduler import PipelineScheduler
@@ -34,21 +36,23 @@ class PipelineManager:
 
     def __init__(
         self,
-        l0_repo: L0Repo,
+        l0_repo: L0FileRepo,
         l1_repo: L1Repo,
-        l2_repo: L2Repo,
+        l2_repo: L2FileRepo,
+        l3_repo: L3FileRepo,
         pipeline_repo: PipelineStateRepo,
-        kv_repo: KVRepo,
         llm_fn: LLMFn,
         embedding_fn: EmbeddingFn,
         config: MemoryV3Config | None = None,
+        on_change: Callable[[], None] | None = None,
     ):
         self._cfg = config or get_memory_v3_config()
         self._l0 = l0_repo
         self._l1 = l1_repo
         self._l2 = l2_repo
+        self._l3 = l3_repo
         self._pipeline_repo = pipeline_repo
-        self._kv = kv_repo
+        self._on_change = on_change
         self._scheduler = PipelineScheduler(self._cfg)
         self._extractor = L1Extractor(l0_repo, l1_repo, llm_fn)
         self._dedup = L1Deduplicator(l1_repo, llm_fn)
@@ -190,25 +194,37 @@ class PipelineManager:
         self._save_state(state)
         logger.info("L2 consolidation complete")
 
+        # Signal cache invalidation
+        if self._on_change:
+            self._on_change()
+
         # Check L3 trigger
         total_facts = self._l1.count()
         if self._scheduler.should_run_l3(state, total_facts):
-            asyncio.create_task(self._run_l3_safe())
+            asyncio.create_task(self._run_l3_safe(session_id, state, total_facts))
 
-    async def _run_l3_safe(self) -> None:
+    async def _run_l3_safe(self, session_id: str, state: PipelineSessionState, total_facts: int) -> None:
         """L3 wrapper with lock and error handling."""
         async with self._l3_lock:
             try:
-                await self._run_l3()
+                await self._run_l3(state, total_facts)
             except Exception as exc:
                 logger.error("L3 pipeline failed: %s", exc)
 
-    async def _run_l3(self) -> None:
+    async def _run_l3(self, state: PipelineSessionState, total_facts: int) -> None:
         """L3 persona generation."""
         from ..persona.persona_generator import PersonaGenerator
-        generator = PersonaGenerator(self._l2, self._kv, self._llm_fn)
+        generator = PersonaGenerator(self._l2, self._l3, self._llm_fn)
         await generator.generate()
-        logger.info("L3 persona generation complete")
+
+        state.last_l3_at = datetime.now(timezone.utc)
+        state.last_l3_fact_count = total_facts
+        self._save_state(state)
+        logger.info("L3 persona generation complete (total_facts=%d)", total_facts)
+
+        # Signal cache invalidation
+        if self._on_change:
+            self._on_change()
 
     async def flush(self, session_id: str) -> None:
         """Force-run all pending pipeline stages for a session."""

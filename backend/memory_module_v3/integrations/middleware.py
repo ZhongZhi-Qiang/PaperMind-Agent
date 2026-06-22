@@ -25,10 +25,11 @@ def build_recall_context(recall_result: dict[str, Any], max_chars: int = 3000) -
     if persona:
         parts_append.append(f"<user-persona>\n{persona}\n</user-persona>")
 
-    # L2 scene navigation
+    # L2 scene navigation (index only, agent loads details via read_scene)
     scenes = recall_result.get("l2_scenes", [])
     if scenes:
         nav_lines = ["<scene-navigation>"]
+        nav_lines.append("Scene index — use read_scene(scene_name) to load full content.")
         for s in scenes[:20]:  # Limit navigation entries
             nav_lines.append(f"- {s['scene_name']} ({s.get('fact_count', 0)} facts)")
         nav_lines.append("</scene-navigation>")

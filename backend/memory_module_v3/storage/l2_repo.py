@@ -152,7 +152,8 @@ class PipelineStateRepo:
     def get(self, session_id: str) -> dict[str, Any] | None:
         sql = """
             SELECT session_id, conversation_count, warmup_threshold,
-                   buffered_message_ids, last_l1_at, last_l2_at, pending_l2, updated_at
+                   buffered_message_ids, last_l1_at, last_l2_at, last_l3_at,
+                   last_l3_fact_count, pending_l2, updated_at
             FROM memory_v3.pipeline_state WHERE session_id = %s
         """
         conn = get_connection()
@@ -171,16 +172,19 @@ class PipelineStateRepo:
         sql = """
             INSERT INTO memory_v3.pipeline_state
                 (session_id, conversation_count, warmup_threshold,
-                 buffered_message_ids, last_l1_at, last_l2_at, pending_l2, updated_at)
+                 buffered_message_ids, last_l1_at, last_l2_at, last_l3_at,
+                 last_l3_fact_count, pending_l2, updated_at)
             VALUES (%(session_id)s, %(conversation_count)s, %(warmup_threshold)s,
                     %(buffered_message_ids)s, %(last_l1_at)s, %(last_l2_at)s,
-                    %(pending_l2)s, now())
+                    %(last_l3_at)s, %(last_l3_fact_count)s, %(pending_l2)s, now())
             ON CONFLICT (session_id) DO UPDATE SET
                 conversation_count = EXCLUDED.conversation_count,
                 warmup_threshold = EXCLUDED.warmup_threshold,
                 buffered_message_ids = EXCLUDED.buffered_message_ids,
                 last_l1_at = EXCLUDED.last_l1_at,
                 last_l2_at = EXCLUDED.last_l2_at,
+                last_l3_at = EXCLUDED.last_l3_at,
+                last_l3_fact_count = EXCLUDED.last_l3_fact_count,
                 pending_l2 = EXCLUDED.pending_l2,
                 updated_at = now()
         """

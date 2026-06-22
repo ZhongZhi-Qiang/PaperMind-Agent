@@ -15,6 +15,8 @@ class PipelineSessionState:
     buffered_message_ids: list[int] = field(default_factory=list)
     last_l1_at: datetime | None = None
     last_l2_at: datetime | None = None
+    last_l3_at: datetime | None = None
+    last_l3_fact_count: int = 0
     pending_l2: bool = False
 
     def to_dict(self) -> dict:
@@ -25,6 +27,8 @@ class PipelineSessionState:
             "buffered_message_ids": self.buffered_message_ids,
             "last_l1_at": self.last_l1_at,
             "last_l2_at": self.last_l2_at,
+            "last_l3_at": self.last_l3_at,
+            "last_l3_fact_count": self.last_l3_fact_count,
             "pending_l2": self.pending_l2,
         }
 
@@ -37,5 +41,7 @@ class PipelineSessionState:
             buffered_message_ids=d.get("buffered_message_ids") or [],
             last_l1_at=d.get("last_l1_at"),
             last_l2_at=d.get("last_l2_at"),
+            last_l3_at=d.get("last_l3_at"),
+            last_l3_fact_count=d.get("last_l3_fact_count", 0),
             pending_l2=d.get("pending_l2", False),
         )

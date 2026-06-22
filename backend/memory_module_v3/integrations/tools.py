@@ -87,3 +87,31 @@ def create_drill_down_tool(offload_manager):
             return f"Failed to retrieve reference: {exc}"
 
     return drill_down
+
+
+def create_read_scene_tool(l2_repo):
+    """Create a LangChain tool for reading L2 scene content by name.
+
+    Agent uses this after viewing scene navigation to load full scene details.
+    """
+    from langchain_core.tools import tool
+
+    @tool
+    async def read_scene(scene_name: str) -> str:
+        """Read the full content of a memory scene block by name.
+
+        Use this when you need the detailed content of a scene listed in scene-navigation.
+
+        Args:
+            scene_name: The scene name from scene-navigation (e.g. transformer_architecture)
+        """
+        try:
+            content = l2_repo.get_by_name(scene_name)
+            if content:
+                return content
+            return f"Scene '{scene_name}' not found. Available scenes: {', '.join(l2_repo.list_names())}"
+        except Exception as exc:
+            logger.error("read_scene tool error: %s", exc)
+            return f"Failed to read scene: {exc}"
+
+    return read_scene

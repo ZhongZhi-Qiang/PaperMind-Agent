@@ -7,7 +7,7 @@ import logging
 from typing import Any, Callable, Awaitable
 
 from ..storage.l1_repo import L1Repo
-from ..storage.l2_repo import L2Repo, L2Scene
+from ..storage.l2_file_repo import L2FileRepo, L2Scene
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ Organize these facts into scene blocks. Return ONLY the JSON array."""
 class SceneExtractor:
     """Consolidates L1 facts into L2 scene blocks."""
 
-    def __init__(self, l1_repo: L1Repo, l2_repo: L2Repo, llm_fn: LLMFn):
+    def __init__(self, l1_repo: L1Repo, l2_repo: L2FileRepo, llm_fn: LLMFn):
         self._l1 = l1_repo
         self._l2 = l2_repo
         self._llm_fn = llm_fn

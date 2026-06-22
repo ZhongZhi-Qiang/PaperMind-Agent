@@ -101,14 +101,19 @@ class AgentManager:
                     self.tools.append(create_drill_down_tool(_v3_offload))
                     logger.info("Registered drill_down tool (deferred)")
             if _v3_recall_service:
-                from memory_module_v3.integrations.middleware import build_recall_context
                 try:
                     recall_result = await _v3_recall_service.recall(message)
-                    ctx = build_recall_context(recall_result)
-                    if ctx.get("append_system_context"):
-                        turn_messages.append({"role": "system", "content": ctx["append_system_context"]})
-                    if ctx.get("prepend_context"):
-                        turn_messages.append({"role": "assistant", "content": ctx["prepend_context"]})
+
+                    # L2/L3 stable context: only inject when changed (full replacement)
+                    if _v3_recall_service.context_changed:
+                        stable_ctx = _v3_recall_service.get_stable_context()
+                        if stable_ctx:
+                            turn_messages.append({"role": "system", "content": stable_ctx})
+
+                    # L1 dynamic context: inject every turn (query-dependent)
+                    prepend = recall_result.get("prepend_context", "")
+                    if prepend:
+                        turn_messages.append({"role": "assistant", "content": prepend})
                 except Exception as v3_exc:
                     logger.warning("Memory v3 auto-recall failed: %s", v3_exc)
 
@@ -290,26 +295,30 @@ async def _init_v3_once():
 
     try:
         from memory_module_v3.storage.pg import ensure_schema
-        from memory_module_v3.storage.l0_repo import L0Repo
+        from memory_module_v3.storage.l0_file_repo import L0FileRepo
         from memory_module_v3.storage.l1_repo import L1Repo
-        from memory_module_v3.storage.l2_repo import L2Repo, PipelineStateRepo, KVRepo
+        from memory_module_v3.storage.l2_file_repo import L2FileRepo
+        from memory_module_v3.storage.l3_file_repo import L3FileRepo
+        from memory_module_v3.storage.l2_repo import PipelineStateRepo
         from memory_module_v3.capture.l0_recorder import L0Recorder
         from memory_module_v3.pipeline.manager import PipelineManager
         from memory_module_v3.retrieval.service import RecallService
         from memory_module_v3.config import get_memory_v3_config
+        from pathlib import Path
 
-        # Initialize schema
+        # Initialize schema (L1/L2/L3 in PostgreSQL, L0 is file-based)
         ensure_schema()
 
         # Create repos
-        l0_repo = L0Repo()
+        settings = get_settings()
+        data_dir = Path(settings.backend_dir) / "memory_module_v3"
+        l0_repo = L0FileRepo(data_dir / "l0")
         l1_repo = L1Repo()
-        l2_repo = L2Repo()
+        l2_repo = L2FileRepo(data_dir / "scenes")
+        l3_repo = L3FileRepo(data_dir)
         pipeline_repo = PipelineStateRepo()
-        kv_repo = KVRepo()
 
         # Build embedding function
-        settings = get_settings()
         from graph.llm import build_embedding_config_from_settings, get_embedding_model
         emb_config = build_embedding_config_from_settings(settings)
         emb_model = get_embedding_model(emb_config)
@@ -333,12 +342,13 @@ async def _init_v3_once():
 
         config = get_memory_v3_config()
 
-        _v3_recorder = L0Recorder(l0_repo, embedding_fn)
+        _v3_recorder = L0Recorder(l0_repo)
+        _v3_recall_service = RecallService(l1_repo, l2_repo, l3_repo, embedding_fn, config)
         _v3_pipeline = PipelineManager(
-            l0_repo, l1_repo, l2_repo, pipeline_repo, kv_repo,
+            l0_repo, l1_repo, l2_repo, l3_repo, pipeline_repo,
             llm_fn, embedding_fn, config,
+            on_change=_v3_recall_service.invalidate_cache,
         )
-        _v3_recall_service = RecallService(l1_repo, l2_repo, kv_repo, embedding_fn, config)
 
         # Symbolic offload (context compression)
         if config.offload_enabled:
@@ -352,6 +362,7 @@ async def _init_v3_once():
 
         # Store in shared dict for cross-module access (tools/__init__.py)
         _v3_services["recall_service"] = _v3_recall_service
+        _v3_services["l2_repo"] = l2_repo
         _v3_services["offload"] = _v3_offload
 
         _v3_initialized = True

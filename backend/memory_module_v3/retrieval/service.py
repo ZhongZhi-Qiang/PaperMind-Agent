@@ -8,11 +8,11 @@ from typing import Any, Callable, Awaitable
 
 from ..config import MemoryV3Config, get_memory_v3_config
 from ..storage.l1_repo import L1Repo
-from ..storage.l2_repo import L2Repo
-from ..storage.l2_repo import KVRepo
+from ..storage.l2_file_repo import L2FileRepo
+from ..storage.l3_file_repo import L3FileRepo
 from .dense import DenseRetriever
 from .keyword import KeywordRetriever
-from .fusion import rrf_fusion, weighted_sum_fusion
+from .fusion import rrf_fusion
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +20,17 @@ EmbeddingFn = Callable[[str], Awaitable[list[float]]]
 
 
 class RecallService:
-    """Unified memory recall: L1 hybrid search + L2 scene navigation + L3 persona."""
+    """Unified memory recall: L1 hybrid search + L2 scene navigation + L3 persona.
+
+    L2/L3 use dirty-flag caching: data is re-read from files only when
+    the pipeline signals a change (invalidate_cache).
+    """
 
     def __init__(
         self,
         l1_repo: L1Repo,
-        l2_repo: L2Repo,
-        kv_repo: KVRepo,
+        l2_repo: L2FileRepo,
+        l3_repo: L3FileRepo,
         embedding_fn: EmbeddingFn,
         config: MemoryV3Config | None = None,
     ):
@@ -34,8 +38,28 @@ class RecallService:
         self._dense = DenseRetriever(l1_repo)
         self._keyword = KeywordRetriever(l1_repo)
         self._l2 = l2_repo
-        self._kv = kv_repo
+        self._l3 = l3_repo
         self._embedding_fn = embedding_fn
+
+        # Dirty-flag cache for L2/L3
+        self._l2_cache: list[dict[str, Any]] | None = None
+        self._l3_cache: str | None = None
+        self._cache_dirty: bool = True
+        self._context_changed: bool = False
+        self._stable_context_str: str = ""
+
+    def invalidate_cache(self) -> None:
+        """Mark L2/L3 cache as stale. Called by PipelineManager after L2/L3 runs."""
+        self._cache_dirty = True
+
+    @property
+    def context_changed(self) -> bool:
+        """Whether L2/L3 context was refreshed on the last recall() call."""
+        return self._context_changed
+
+    def get_stable_context(self) -> str:
+        """Return formatted L2/L3 system context (cached)."""
+        return self._stable_context_str
 
     async def recall(
         self,
@@ -46,28 +70,47 @@ class RecallService:
     ) -> dict[str, Any]:
         """Full recall: L1 facts + L2 scene navigation + L3 persona.
 
+        L1 is searched fresh every turn (query-dependent).
+        L2/L3 are cached and only refreshed when dirty.
+
         Returns:
             {
                 "l1_facts": [...],        # relevant atomic facts
-                "l2_scenes": [...],       # scene navigation links
-                "l3_persona": str | None, # user persona markdown
+                "l2_scenes": [...],       # scene navigation links (from cache)
+                "l3_persona": str | None, # user persona markdown (from cache)
             }
         """
-        cfg = self._config
+        from ..integrations.middleware import build_recall_context
 
-        # Run L1 search and L2/L3 fetch in parallel
+        # L1: search every turn (query-dependent)
         l1_task = self._recall_l1(query, fact_type=fact_type, scene_name=scene_name)
-        l2_task = self._recall_l2()
-        l3_task = self._recall_l3()
 
-        l1_facts, l2_scenes, l3_persona = await asyncio.gather(
-            l1_task, l2_task, l3_task
-        )
+        # L2/L3: only re-read when cache is dirty, then replace stable context
+        self._context_changed = False
+        if self._cache_dirty:
+            self._l2_cache = self._l2.get_all()
+            self._l3_cache = self._l3.get()
+            self._cache_dirty = False
+            self._context_changed = True
+
+            # Rebuild stable context string (full replacement)
+            ctx = build_recall_context({
+                "l2_scenes": self._l2_cache or [],
+                "l3_persona": self._l3_cache,
+            })
+            self._stable_context_str = ctx.get("append_system_context", "")
+            logger.debug("L2/L3 cache refreshed, stable context replaced")
+
+        l1_facts = await l1_task
+
+        # Build dynamic context (L1 only, changes every turn)
+        ctx = build_recall_context({"l1_facts": l1_facts})
 
         return {
             "l1_facts": l1_facts,
-            "l2_scenes": l2_scenes,
-            "l3_persona": l3_persona,
+            "l2_scenes": self._l2_cache or [],
+            "l3_persona": self._l3_cache,
+            "prepend_context": ctx.get("prepend_context", ""),
         }
 
     async def _recall_l1(
@@ -145,30 +188,6 @@ class RecallService:
                 r["content"] = content[:max_chars] + "..."
 
         return results[:cfg.inject_top_k]
-
-    async def _recall_l2(self) -> list[dict[str, Any]]:
-        """L2 scene navigation: return scene list for agent to browse."""
-        try:
-            scenes = self._l2.get_all()
-            # Return lightweight navigation info
-            return [
-                {
-                    "scene_name": s["scene_name"],
-                    "fact_count": len(s.get("fact_ids") or []),
-                }
-                for s in scenes
-            ]
-        except Exception as exc:
-            logger.warning("L2 scene fetch failed: %s", exc)
-            return []
-
-    async def _recall_l3(self) -> str | None:
-        """L3 persona: return the user persona markdown."""
-        try:
-            return self._kv.get("persona")
-        except Exception as exc:
-            logger.warning("L3 persona fetch failed: %s", exc)
-            return None
 
     async def search_facts(
         self,

@@ -2,7 +2,13 @@
 .venv/
 .cursor/
 .claude/
+.claude/reviews/
+.claude/loops/
+.claude/.upgrade-backups/
+.claude/.upgrade-tmp/
 .lsp.json
+*.local.json
+.codegraph/
 openspec/
 backend/.env
 backend/.venv/
@@ -32,6 +38,7 @@ backend/temp_*.txt
 backend/lint_report.txt
 backend/orphan_report.json
 frontend/.next/
+node_modules/
 frontend/node_modules/
 frontend/.npm-cache/
 .vscode/

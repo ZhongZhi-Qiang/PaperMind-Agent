@@ -26,7 +26,8 @@ Mini-OpenClaw is a local, file-first, auditable AI Agent workbench built on Lang
 
 **Memory system** (`MEMORY_BACKEND` env var: `off` | `v3`):
 
-- `memory_module_v3/` — Four-layer memory pyramid (L0→L1→L2→L3) with auto-capture and auto-recall. Includes `offload/` — Symbolic Short-Term Memory pipeline (L1 summary → L1.5 task judgment → L2 Mermaid generation → L3 progressive compression). Two independent operations in `before_model`: **summary replacement** — replace old `ToolMessage.content` with plain text `[Offloaded Tool Result | node: N2]\nSummary: ...\nresult_ref: refs/xxx.md`; **MMD injection** — insert active `.mmd` Mermaid diagram as a `HumanMessage` wrapped in `<current_task_context>` tags, positioned after the last user message.
+- `memory_module_v3/` — Four-layer memory pyramid (L0→L1→L2→L3) with auto-capture and auto-recall. **Hybrid storage**: L0 (raw messages) stored as local JSON files at `memory_module_v3/l0/{session_id}.json`; L2 (scenes) as `.md` files at `memory_module_v3/scenes/`; L3 (persona) as `memory_module_v3/persona.md`; L1 (facts) + pipeline state in PostgreSQL with pgvector. L0 has no embedding — it is a temporary buffer for L1 extraction only.
+- Includes `offload/` — Symbolic Short-Term Memory pipeline (L1 summary → L1.5 task judgment → L2 Mermaid generation → L3 progressive compression). Two independent operations in `before_model`: **summary replacement** — replace old `ToolMessage.content` with plain text `[Offloaded Tool Result | node: N2]\nSummary: ...\nresult_ref: refs/xxx.md`; **MMD injection** — insert active `.mmd` Mermaid diagram as a `HumanMessage` wrapped in `<current_task_context>` tags, positioned after the last user message.
 
 **Injection modes** (v3): `tool` (agent calls `search_memory_v3` autonomously), `always` (force-inject every turn, default), `off`.
 
@@ -135,7 +136,7 @@ pytest tests/test_agent_guardian_integration.py  # Agent + Guardian integration
 ## Key Design Patterns
 
 - **Middleware chain:** Guardian (`before_agent`) → HarnessSecurity (`wrap_tool_call`) → ContextOffload (`before_model`, `wrap_tool_call`) → Summarization (`before_model`) → HarnessReview (`after_agent`). Each middleware implements a subset of 7 available hooks from LangChain's `AgentMiddleware` base class.
-- **File-as-memory:** Sessions persist as `backend/sessions/*.json`.
+- **File-as-memory:** Sessions persist as `backend/sessions/*.json`. L0 raw messages as `memory_module_v3/l0/{session_id}.json`. L2 scenes as `memory_module_v3/scenes/*.md`. L3 persona as `memory_module_v3/persona.md`.
 - **Idempotent distillation:** After each chat turn, background task distills new exchanges only (deterministic exchange_id). Uses `DISTILL_*` model if configured, otherwise main LLM.
 - **Provider aliasing:** `config.py` maps aliases (e.g., `glm`→`zhipu`, `aliyun`→`bailian`, `dashscope`→`bailian`) for flexible env var configuration.
 - **Checkpointer reconnect:** `chat.py` catches recoverable Postgres connection errors and retries once after reconnecting.
@@ -170,12 +171,13 @@ Results saved as `eval_results_*.json`. See `eval_v3_report.md` for baseline com
 - `scripts/check.mjs` — Pre-commit checks (lint, type-check)
 - `scripts/init.mjs` — Project initialization (dependencies, config)
 - `scripts/upgrade.mjs` — Dependency upgrade helper
+- `scripts/gc-scan.mjs` — Garbage collection scan for project health
 
 ## Infrastructure Requirements
 
 - Python 3.10+
 - Node.js 18+
-- PostgreSQL with pgvector extension (for memory v2/v3 and optional checkpointer)
+- PostgreSQL with pgvector extension (for L1 facts, pipeline state, and optional checkpointer)
 - Optional: Langfuse (has its own Postgres — can share with pgvector image)
 
 # 行为准则（Karpathy 原则）
@@ -229,8 +231,8 @@ Results saved as `eval_results_*.json`. See `eval_v3_report.md` for baseline com
 |:---:|---|----|----|
 | L0 | 裸用 | 没有 CLAUDE.md | — |
 | L1 | 规则层 | 有 CLAUDE.md + 行为准则 | — |
-| **L2** | **反馈回路** | **PreToolUse + SessionStart + Stop 已激活** | **← 当前** |
-| L3 | 自动修正 | 加上 PostToolUse 后自动格式化 | 取消 settings.json 中 PostToolUse 注释即可 |
+| L2 | 反馈回路 | PreToolUse + SessionStart + Stop 已激活 | ✅ |
+| **L3** | **自动修正** | **加上 PostToolUse 后自动格式化** | **← 当前** |
 | L4 | 自治系统 | Agent 定期扫描代码/文档一致性，自动发起修复 PR | — |
 
 # Skill 路由

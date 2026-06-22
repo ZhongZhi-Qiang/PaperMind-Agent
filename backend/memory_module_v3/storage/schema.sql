@@ -4,18 +4,7 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE SCHEMA IF NOT EXISTS memory_v3;
 
--- L0: Raw conversation messages
-CREATE TABLE IF NOT EXISTS memory_v3.l0_messages (
-    msg_id      BIGSERIAL PRIMARY KEY,
-    session_id  TEXT NOT NULL,
-    role        TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    embedding   vector(1024)
-);
-
-CREATE INDEX IF NOT EXISTS ix_l0_messages_session_ts
-    ON memory_v3.l0_messages(session_id, ts);
+-- L0: Raw conversation messages (stored as local JSON files, not in PostgreSQL)
 
 -- L1: Structured atomic facts
 CREATE TABLE IF NOT EXISTS memory_v3.l1_facts (
@@ -69,6 +58,8 @@ CREATE TABLE IF NOT EXISTS memory_v3.pipeline_state (
     buffered_message_ids  BIGINT[],
     last_l1_at            TIMESTAMPTZ,
     last_l2_at            TIMESTAMPTZ,
+    last_l3_at            TIMESTAMPTZ,
+    last_l3_fact_count    INT DEFAULT 0,
     pending_l2            BOOLEAN DEFAULT FALSE,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );

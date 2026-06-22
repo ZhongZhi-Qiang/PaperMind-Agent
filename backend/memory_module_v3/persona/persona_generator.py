@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Awaitable
 
-from ..storage.l2_repo import L2Repo, KVRepo
+from ..storage.l2_file_repo import L2FileRepo
+from ..storage.l3_file_repo import L3FileRepo
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +34,9 @@ Generate a comprehensive user persona profile in markdown format."""
 class PersonaGenerator:
     """Generates L3 user persona from L2 scene blocks."""
 
-    def __init__(self, l2_repo: L2Repo, kv_repo: KVRepo, llm_fn: LLMFn):
+    def __init__(self, l2_repo: L2FileRepo, l3_repo: L3FileRepo, llm_fn: LLMFn):
         self._l2 = l2_repo
-        self._kv = kv_repo
+        self._l3 = l3_repo
         self._llm_fn = llm_fn
 
     async def generate(self) -> str | None:
@@ -65,7 +66,7 @@ class PersonaGenerator:
             nav_lines.append(f"- [[{s['scene_name']}]]")
         persona += "\n".join(nav_lines)
 
-        # Save to KV store
-        self._kv.set("persona", persona)
+        # Save to file
+        self._l3.set(persona)
         logger.info("L3 persona generated (%d chars)", len(persona))
         return persona

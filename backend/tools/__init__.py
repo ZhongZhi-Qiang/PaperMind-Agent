@@ -86,6 +86,12 @@ def get_all_tools(base_dir: Path) -> list[BaseTool]:
             if cfg.offload_enabled and offload:
                 from memory_module_v3.integrations.tools import create_drill_down_tool
                 tools.append(create_drill_down_tool(offload))
+
+            # Scene reader tool (always available with v3)
+            l2_repo = _v3_services.get("l2_repo")
+            if l2_repo:
+                from memory_module_v3.integrations.tools import create_read_scene_tool
+                tools.append(create_read_scene_tool(l2_repo))
         except Exception as exc:
             logger.warning("v3 tool registration failed (non-fatal): %s", exc)
 

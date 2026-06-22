@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..storage.l0_repo import L0Repo
+from ..storage.l0_file_repo import L0FileRepo
 from ..storage.l1_repo import L1Fact, L1Repo
 from .prompts import EXTRACT_SYSTEM, EXTRACT_USER
 
@@ -27,7 +27,7 @@ class L1Extractor:
     Reads L0 messages, calls LLM to extract SceneSegment[], and writes L1 facts.
     """
 
-    def __init__(self, l0_repo: L0Repo, l1_repo: L1Repo, llm_fn=None):
+    def __init__(self, l0_repo: L0FileRepo, l1_repo: L1Repo, llm_fn=None):
         self._l0 = l0_repo
         self._l1 = l1_repo
         self._llm_fn = llm_fn  # async callable: (system, user) -> str
@@ -53,14 +53,14 @@ class L1Extractor:
             return []
 
         # Fetch new messages
-        new_msgs = self._l0.get_by_ids(message_ids)
+        new_msgs = self._l0.get_by_ids(message_ids, session_id=session_id)
         if not new_msgs:
             return []
 
         # Fetch background context if available
         background_section = ""
         if background_ids:
-            bg_msgs = self._l0.get_by_ids(background_ids)
+            bg_msgs = self._l0.get_by_ids(background_ids, session_id=session_id)
             if bg_msgs:
                 bg_lines = [f"[{m['role']}] {m['content'][:200]}" for m in bg_msgs[-10:]]
                 background_section = "Previous context:\n" + "\n".join(bg_lines)

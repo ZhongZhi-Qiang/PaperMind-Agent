@@ -86,6 +86,11 @@ class PipelineScheduler:
     def should_run_l3(self, state: PipelineSessionState, total_facts: int) -> bool:
         """Check if L3 persona generation should run.
 
-        Triggers: total_facts >= l3_trigger_every_n
+        Triggers when total facts reach l3_trigger_every_n, then re-triggers
+        every l3_trigger_every_n new facts after the last L3 run.
         """
-        return total_facts >= self._cfg.l3_trigger_every_n
+        cfg = self._cfg
+        if total_facts < cfg.l3_trigger_every_n:
+            return False
+        # Enough new facts since last L3
+        return total_facts - state.last_l3_fact_count >= cfg.l3_trigger_every_n

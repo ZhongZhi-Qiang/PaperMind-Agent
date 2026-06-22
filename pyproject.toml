@@ -1,0 +1,9 @@
+[project]
+name = "papermind-agent"
+version = "0.1.0"
+description = "Mini-OpenClaw: Local, file-first AI Agent workbench with long-term memory"
+requires-python = ">=3.10"
+
+[tool.pyright]
+include = ["backend"]
+pythonVersion = "3.10"
