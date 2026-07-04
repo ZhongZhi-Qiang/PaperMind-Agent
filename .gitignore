@@ -44,6 +44,5 @@ frontend/.npm-cache/
 .vscode/
 .idea/
 *.log
-docs/
 .DS_Store
 Thumbs.db
