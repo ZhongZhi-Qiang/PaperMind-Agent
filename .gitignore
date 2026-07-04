@@ -1,11 +1,6 @@
 .env
 .venv/
 .cursor/
-.claude/
-.claude/reviews/
-.claude/loops/
-.claude/.upgrade-backups/
-.claude/.upgrade-tmp/
 .lsp.json
 *.local.json
 .codegraph/
