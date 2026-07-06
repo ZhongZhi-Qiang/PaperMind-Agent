@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
     ChatDeepSeek = None
 
 from config import Settings
+from config import LLM_PROVIDER_DEFAULTS, PROVIDER_ALIASES
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,46 @@ def build_llm_config_from_settings(
         temperature=temperature,
         streaming=streaming,
     )
+
+
+def build_fast_llm_config_from_settings(
+    settings: Settings,
+    *,
+    temperature: float = 0.0,
+    streaming: bool = False,
+) -> ResolvedLLMConfig | None:
+    """Build a config for the lightweight/fast LLM, or None if not configured.
+
+    Falls back to the main LLM config when FAST_LLM_PROVIDER is unset — callers
+    can use this transparently and still get a working LLM.
+    """
+    if not settings.fast_llm_provider:
+        return None
+    provider = settings.fast_llm_provider.strip().lower()
+    provider = PROVIDER_ALIASES.get(provider, provider) if PROVIDER_ALIASES else provider
+    model = settings.fast_llm_model or LLM_PROVIDER_DEFAULTS.get(provider, {}).get("model")
+    if not model:
+        return None
+    base_url = settings.fast_llm_base_url or LLM_PROVIDER_DEFAULTS.get(provider, {}).get("base_url", "")
+    return ResolvedLLMConfig(
+        provider=provider,
+        model=model,
+        api_key=settings.fast_llm_api_key,
+        base_url=base_url,
+        temperature=temperature,
+        streaming=streaming,
+    )
+
+
+def get_fast_llm(settings: Settings | None = None, *, temperature: float = 0.0, streaming: bool = False) -> BaseChatModel:
+    """Return the fast LLM, or fall back to the main LLM if unconfigured."""
+    from config import get_settings
+
+    s = settings or get_settings()
+    fast_cfg = build_fast_llm_config_from_settings(s, temperature=temperature, streaming=streaming)
+    if fast_cfg is not None:
+        return get_llm(fast_cfg)
+    return get_llm(build_llm_config_from_settings(s, temperature=temperature, streaming=streaming))
 
 
 def get_llm(config: ResolvedLLMConfig) -> BaseChatModel:

@@ -61,6 +61,64 @@ class RecallService:
         """Return formatted L2/L3 system context (cached)."""
         return self._stable_context_str
 
+    # ── embedding cache (quantized key → Redis, O(1), no DB) ──
+
+    async def _emb_cache_get(self, emb: list[float]) -> list[float] | None:
+        try:
+            from storage.redis_client import quantized_emb_key, cache_get_float_list
+            return await cache_get_float_list(quantized_emb_key("emb", emb))
+        except ImportError:
+            return None
+        except Exception:
+            return None
+
+    async def _emb_cache_set(self, emb: list[float]) -> None:
+        try:
+            from storage.redis_client import quantized_emb_key, cache_set_float_list
+            from config import get_settings
+            await cache_set_float_list(
+                quantized_emb_key("emb", emb), emb,
+                get_settings().redis_embed_cache_ttl,
+            )
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+    async def _compute_embedding(self, query: str) -> list[float]:
+        """Compute query embedding, deduplicated by quantized-key cache."""
+        emb = await self._embedding_fn(query)
+        cached = await self._emb_cache_get(emb)
+        if cached is not None:
+            return cached
+        await self._emb_cache_set(emb)
+        return emb
+
+    # ── recall result cache (quantized embedding hash → Redis, O(1), no DB) ──
+
+    async def _recall_cache_get(self, emb: list[float]) -> dict[str, Any] | None:
+        try:
+            from storage.redis_client import quantized_emb_key, cache_get_json
+            return await cache_get_json(quantized_emb_key("recall", emb))
+        except ImportError:
+            return None
+        except Exception as exc:
+            logger.debug("Recall cache read failed: %s", exc)
+            return None
+
+    async def _recall_cache_set(self, emb: list[float], result: dict[str, Any]) -> None:
+        try:
+            from storage.redis_client import quantized_emb_key, cache_set_json
+            from config import get_settings
+            await cache_set_json(
+                quantized_emb_key("recall", emb), result,
+                get_settings().redis_recall_cache_ttl,
+            )
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug("Recall cache write failed: %s", exc)
+
     async def recall(
         self,
         query: str,
@@ -68,67 +126,96 @@ class RecallService:
         fact_type: str | None = None,
         scene_name: str | None = None,
     ) -> dict[str, Any]:
-        """Full recall: L1 facts + L2 scene navigation + L3 persona.
+        """Full recall with quantized-embedding-key cache.
 
-        L1 is searched fresh every turn (query-dependent).
-        L2/L3 are cached and only refreshed when dirty.
-
-        Returns:
-            {
-                "l1_facts": [...],        # relevant atomic facts
-                "l2_scenes": [...],       # scene navigation links (from cache)
-                "l3_persona": str | None, # user persona markdown (from cache)
-            }
+        1. Compute embedding (deduped by quantize-key cache)
+        2. Quantize → Redis GET for recall-result cache
+        3. Hit → return cached context (skip DB retrieval)
+        4. Miss → L1 hybrid search → cache result
         """
         from ..integrations.middleware import build_recall_context
 
-        # L1: search every turn (query-dependent)
-        l1_task = self._recall_l1(query, fact_type=fact_type, scene_name=scene_name)
+        # ── Step 1: compute embedding (quantized-key cache dedupes similar queries) ──
+        emb: list[float] | None = None
+        cfg = self._config
+        if cfg.recall_strategy in ("hybrid", "embedding"):
+            try:
+                emb = await self._compute_embedding(query)
+            except Exception as exc:
+                logger.warning("Embedding failed: %s", exc)
+                if cfg.recall_strategy == "embedding":
+                    return {"l1_facts": [], "l2_scenes": [], "l3_persona": None, "prepend_context": ""}
 
-        # L2/L3: only re-read when cache is dirty, then replace stable context
+        # ── Step 2: recall-result cache (quantized embedding key → Redis) ──
+        if emb is not None:
+            cached_result = await self._recall_cache_get(emb)
+            if cached_result is not None:
+                self._context_changed = False
+                if self._cache_dirty:
+                    self._l2_cache = self._l2.get_all()
+                    self._l3_cache = self._l3.get()
+                    self._cache_dirty = False
+                    self._context_changed = True
+                    ctx = build_recall_context({
+                        "l2_scenes": self._l2_cache or [],
+                        "l3_persona": self._l3_cache,
+                    })
+                    self._stable_context_str = ctx.get("append_system_context", "")
+                return cached_result
+
+        # ── Step 3: L1 hybrid search (pass pre-computed embedding) ──
+        l1_task = self._recall_l1(query, query_embedding=emb,
+                                  fact_type=fact_type, scene_name=scene_name)
+
+        # L2/L3
         self._context_changed = False
         if self._cache_dirty:
             self._l2_cache = self._l2.get_all()
             self._l3_cache = self._l3.get()
             self._cache_dirty = False
             self._context_changed = True
-
-            # Rebuild stable context string (full replacement)
             ctx = build_recall_context({
                 "l2_scenes": self._l2_cache or [],
                 "l3_persona": self._l3_cache,
             })
             self._stable_context_str = ctx.get("append_system_context", "")
-            logger.debug("L2/L3 cache refreshed, stable context replaced")
 
         l1_facts = await l1_task
-
-        # Build dynamic context (L1 only, changes every turn)
         ctx = build_recall_context({"l1_facts": l1_facts})
 
-        return {
+        result = {
             "l1_facts": l1_facts,
             "l2_scenes": self._l2_cache or [],
             "l3_persona": self._l3_cache,
             "prepend_context": ctx.get("prepend_context", ""),
         }
 
+        # ── Step 4: cache result for future similar queries ──
+        if emb is not None:
+            await self._recall_cache_set(emb, result)
+
+        return result
+
     async def _recall_l1(
         self,
         query: str,
         *,
+        query_embedding: list[float] | None = None,
         fact_type: str | None = None,
         scene_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """L1 hybrid search with configurable strategy."""
+        """L1 hybrid search with configurable strategy.
+
+        When query_embedding is pre-computed (from recall()), it is reused directly.
+        Otherwise computed on demand via _compute_embedding (quantized-key dedup).
+        """
         cfg = self._config
         strategy = cfg.recall_strategy
 
         # Compute query embedding if needed
-        query_embedding: list[float] | None = None
-        if strategy in ("hybrid", "embedding"):
+        if query_embedding is None and strategy in ("hybrid", "embedding"):
             try:
-                query_embedding = await self._embedding_fn(query)
+                query_embedding = await self._compute_embedding(query)
             except Exception as exc:
                 logger.warning("Embedding computation failed: %s", exc)
                 if strategy == "embedding":
@@ -204,7 +291,7 @@ class RecallService:
         query_embedding: list[float] | None = None
         if strategy in ("hybrid", "embedding"):
             try:
-                query_embedding = await self._embedding_fn(query)
+                query_embedding = await self._compute_embedding(query)
             except Exception as exc:
                 logger.warning("Embedding failed: %s", exc)
 

@@ -139,7 +139,7 @@ def build_agent_config(
             # Build offload LLM (separate model saves tokens)
             if offload_enabled:
                 try:
-                    from graph.llm import ResolvedLLMConfig
+                    from graph.llm import ResolvedLLMConfig, get_fast_llm
                     offload_provider = v3_cfg.offload_llm_provider
                     offload_model = v3_cfg.offload_llm_model
                     if offload_provider and offload_model:
@@ -155,8 +155,11 @@ def build_agent_config(
                             streaming=False,
                         ))
                     else:
-                        # Reuse main LLM
-                        offload_llm = llm
+                        # Prefer fast LLM for offload (saves tokens/latency); fall back to main
+                        try:
+                            offload_llm = get_fast_llm(settings, temperature=0.2, streaming=False)
+                        except Exception:
+                            offload_llm = llm
                 except Exception as llm_exc:
                     logger.warning("Failed to create offload LLM: %s, using main LLM", llm_exc)
                     offload_llm = llm

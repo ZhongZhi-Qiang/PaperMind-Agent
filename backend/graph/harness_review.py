@@ -247,6 +247,7 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
 
     @override
     def after_agent(self, state: AgentState[ResponseT], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
+        # Sync path — only used when HARNESS_REVIEW_SYNC=true (debugging) or when LLM is fast/local
         result = self._do_review(state)
         if result:
             return {"harness_review": result}
@@ -254,9 +255,16 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
 
     @override
     async def aafter_agent(self, state: AgentState[ResponseT], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
-        result = await asyncio.to_thread(self._do_review, state)
-        if result:
-            return {"harness_review": result}
+        from config import get_settings
+        if get_settings().harness_review_sync:
+            # Force sync: block until review finishes (debugging only)
+            result = await asyncio.to_thread(self._do_review, state)
+            return {"harness_review": result} if result else None
+
+        # Default: fire-and-forget — don't block the `done` event on review LLM call.
+        # Review result is logged but no longer written back to agent state (it was not consumed
+        # downstream anyway). This shaves one full LLM round-trip off perceived latency.
+        asyncio.create_task(asyncio.to_thread(self._do_review, state))
         return None
 
 

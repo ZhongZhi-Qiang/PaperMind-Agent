@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -51,9 +52,8 @@ class AgentManager:
 
     # 用于generate_title()和summarize_history()
     def _build_chat_model(self):
-        settings = get_settings()
-        llm_config = build_llm_config_from_settings(settings, temperature=0.0, streaming=False)
-        return get_llm(llm_config)
+        from graph.llm import get_fast_llm
+        return get_fast_llm(get_settings(), temperature=0.0, streaming=False)
 
     def _build_agent(self):
         if self.base_dir is None:
@@ -80,6 +80,11 @@ class AgentManager:
     ):
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
+
+        import time as _time
+        _t0 = _time.perf_counter()  # request received
+        _t1: float | None = None     # recall done
+        _t2: float | None = None     # first assistant token
 
         memory_backend = get_memory_backend()
         turn_messages: list[dict[str, str]] = []
@@ -116,6 +121,11 @@ class AgentManager:
                         turn_messages.append({"role": "assistant", "content": prepend})
                 except Exception as v3_exc:
                     logger.warning("Memory v3 auto-recall failed: %s", v3_exc)
+            _t1 = _time.perf_counter()
+            logger.info(
+                "latency session=%s recall_ms=%.0f",
+                session_id, (_t1 - _t0) * 1000,
+            )
 
         turn_messages.append({"role": "user", "content": message})
 
@@ -153,6 +163,14 @@ class AgentManager:
 
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
+                    if _t2 is None:
+                        _t2 = _time.perf_counter()
+                        logger.info(
+                            "latency session=%s first_token_ms=%.0f ttft_ms=%.0f",
+                            session_id,
+                            (_t2 - _t1) * 1000 if _t1 else (_t2 - _t0) * 1000,
+                            (_t2 - _t0) * 1000,
+                        )
                     final_content_parts.append(text)
                     yield {"type": "token", "content": text}
                 continue
@@ -206,15 +224,19 @@ class AgentManager:
 
         final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
 
-        # --- v3 auto-capture ---
+        # --- v3 auto-capture (fire-and-forget: don't block `done` event) ---
         if memory_backend == "v3" and _v3_recorder and _v3_pipeline:
-            try:
-                user_id, asst_id = await _v3_recorder.capture(
-                    session_id, message, final_content,
-                )
-                await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
-            except Exception as v3_cap_exc:
-                logger.warning("Memory v3 auto-capture failed: %s", v3_cap_exc)
+            from config import get_settings
+            if get_settings().memory_v3_async_capture:
+                _spawn_background_task(_v3_capture_async(session_id, message, final_content))
+            else:
+                try:
+                    user_id, asst_id = await _v3_recorder.capture(
+                        session_id, message, final_content,
+                    )
+                    await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
+                except Exception as v3_cap_exc:
+                    logger.warning("Memory v3 auto-capture failed: %s", v3_cap_exc)
         # 若 LLM 返回了 usage，且本次调用启用了 Langfuse，则在结束时补充 usage 信息，方便在 Langfuse 中显示 tokens
         if last_usage and context and context.callbacks:
             try:
@@ -239,6 +261,13 @@ class AgentManager:
                     )
             except Exception as exc:
                 print("[langfuse] 更新 usage 失败：", repr(exc))
+        _t3 = _time.perf_counter()
+        logger.info(
+            "latency session=%s done_ms=%.0f total_ms=%.0f",
+            session_id,
+            (_t3 - (_t2 or _t1 or _t0)) * 1000,
+            (_t3 - _t0) * 1000,
+        )
         yield {"type": "done", "content": final_content}
 
     async def generate_title(self, first_user_message: str) -> str:
@@ -287,6 +316,29 @@ class AgentManager:
 agent_manager = AgentManager()
 
 
+# Keep strong refs to fire-and-forget background tasks so they aren't GC'd mid-run.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def _v3_capture_async(session_id: str, message: str, final_content: str) -> None:
+    """Background auto-capture: writes this turn to long-term memory without blocking the SSE `done`."""
+    if not _v3_recorder or not _v3_pipeline:
+        return
+    try:
+        user_id, asst_id = await _v3_recorder.capture(session_id, message, final_content)
+        await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
+    except Exception as exc:
+        logger.warning("Memory v3 async auto-capture failed: %s", exc)
+
+
+def _spawn_background_task(coro: Any) -> asyncio.Task:
+    """Schedule a fire-and-forget task and track it to prevent GC."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 async def _init_v3_once():
     """Lazy initialization of v3 memory system (called once on first v3 request)."""
     global _v3_initialized, _v3_recorder, _v3_pipeline, _v3_recall_service, _v3_offload
@@ -327,14 +379,14 @@ async def _init_v3_once():
             import asyncio
             return await asyncio.to_thread(emb_model.embed_query, text)
 
-        # Build LLM function for extraction/dedup
-        llm_config = build_llm_config_from_settings(settings, temperature=0.0, streaming=False)
-        llm = get_llm(llm_config)
+        # Build LLM function for extraction/dedup — prefer fast LLM to save tokens/latency
+        from graph.llm import get_fast_llm as _get_fast_llm
+        distill_llm = _get_fast_llm(settings, temperature=0.0, streaming=False)
 
         async def llm_fn(system: str, user: str) -> str:
             import asyncio
             response = await asyncio.to_thread(
-                llm.invoke,
+                distill_llm.invoke,
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
             )
             content = getattr(response, "content", "")
@@ -350,11 +402,11 @@ async def _init_v3_once():
             on_change=_v3_recall_service.invalidate_cache,
         )
 
-        # Symbolic offload (context compression)
+        # Symbolic offload (context compression) — reuse distill/fast LLM
         if config.offload_enabled:
             from memory_module_v3.offload.offload_manager import OffloadManager
             _v3_offload = OffloadManager(
-                llm=llm,
+                llm=distill_llm,
                 data_dir=Path(settings.backend_dir) / "memory_module_v3" / "offload",
                 threshold=config.offload_threshold,
                 enabled=True,

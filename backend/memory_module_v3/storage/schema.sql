@@ -70,3 +70,16 @@ CREATE TABLE IF NOT EXISTS memory_v3.kv_store (
     value      TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Cache index for similarity-based recall/embedding cache lookup (tier-2).
+-- When a keyword-normalized key misses, the query embedding is searched here
+-- via cosine distance. The matching redis_key is then fetched from Redis.
+CREATE TABLE IF NOT EXISTS memory_v3.cache_index (
+    redis_key   TEXT PRIMARY KEY,
+    cache_type  TEXT NOT NULL,  -- 'recall' or 'embedding'
+    query_emb   vector(1024) NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_cache_index_emb_hnsw
+    ON memory_v3.cache_index USING hnsw (query_emb vector_cosine_ops);

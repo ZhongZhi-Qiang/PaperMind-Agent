@@ -16,6 +16,30 @@ GuardianLabel = Literal["safe", "dangerous"]
 logger = logging.getLogger(__name__)
 
 
+# Rule-based short-circuit patterns — skip LLM entirely when matched.
+# Blacklist: known prompt-injection signatures → mark dangerous directly.
+# Whitelist: clearly academic/benign prefixes (with no blacklist hit) → mark safe directly.
+GUARDIAN_BLACKLIST_PATTERNS: tuple[str, ...] = (
+    "忽略", "ignore previous", "ignore all", "ignore the above",
+    "system prompt", "your instructions", "你的指令", "你的提示词",
+    "developer mode", "developer mode", "DAN", "jailbreak",
+    "扮演", "roleplay as", "now you are", "你现在是",
+    "show me your prompt", "show your instructions", "reveal your",
+    "无限制", "unrestricted", "bypass", "绕过",
+    "special commands", "特殊指令", "maintenance mode",
+    "help me hack", "extract your rules",
+)
+
+
+def _is_trivially_dangerous(text: str) -> bool:
+    """Blacklist short-circuit: known injection signatures → dangerous."""
+    lowered = text.lower()
+    for pat in GUARDIAN_BLACKLIST_PATTERNS:
+        if pat in lowered:
+            return True
+    return False
+
+
 class GuardianOutput(BaseModel):
     """Guardian structured output schema — enforced via Function Calling."""
 
@@ -232,13 +256,25 @@ def _request_guardian_decision(user_text: str) -> GuardianOutput:
     from langchain_openai import ChatOpenAI
 
     timeout_seconds = max(0.1, settings.guardian_timeout_ms / 1000.0)
-    client = ChatOpenAI(
-        model=settings.guardian_model,
-        api_key=settings.guardian_api_key,
-        base_url=settings.guardian_base_url,
-        temperature=0,
-        timeout=timeout_seconds,
-    )
+    # Use fast LLM if configured (Guardian is a binary classifier — a small/fast model suffices)
+    fast_cfg = None
+    try:
+        from graph.llm import build_fast_llm_config_from_settings
+        fast_cfg = build_fast_llm_config_from_settings(settings, temperature=0.0, streaming=False)
+    except Exception:
+        fast_cfg = None
+
+    if fast_cfg is not None:
+        from graph.llm import get_llm
+        client = get_llm(fast_cfg)
+    else:
+        client = ChatOpenAI(
+            model=settings.guardian_model,
+            api_key=settings.guardian_api_key,
+            base_url=settings.guardian_base_url,
+            temperature=0,
+            timeout=timeout_seconds,
+        )
 
     # Add explicit JSON output instruction to system prompt
     json_instruction = (
@@ -268,6 +304,41 @@ def evaluate_guardian_input(user_text: str) -> GuardianRuntimeResult:
             block_message=block_message,
         )
 
+    # Layer 1: rule-based short-circuit (skips LLM entirely)
+    if settings.guardian_rule_shortcircuit_enabled:
+        if _is_trivially_dangerous(user_text):
+            return GuardianRuntimeResult(
+                is_blocked=True,
+                label="dangerous",
+                reason_code="guardian_blacklist_shortcircuit",
+                block_message=block_message,
+            )
+
+    # Layer 2: Redis cache lookup (avoids re-invoking LLM for repeat/near-identical inputs)
+    _cache_get = None  # type: ignore[assignment]
+    _cache_set = None  # type: ignore[assignment]
+    _cache_key_fn = None  # type: ignore[assignment]
+    if settings.guardian_cache_enabled:
+        try:
+            from storage.redis_client import cache_get_sync as _cache_get
+            from storage.redis_client import cache_set_sync as _cache_set
+            from storage.redis_client import guardian_cache_key as _cache_key_fn
+        except ImportError:
+            pass
+
+    if _cache_get is not None and _cache_key_fn is not None:
+        cache_key = _cache_key_fn(user_text)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            label = cached if cached in ("safe", "dangerous") else None
+            if label is not None:
+                return GuardianRuntimeResult(
+                    is_blocked=(label == "dangerous"),
+                    label=label,
+                    reason_code="guardian_cache_hit",
+                    block_message=block_message,
+                )
+
     try:
         result = _request_guardian_decision(user_text)
         label = result.label
@@ -279,6 +350,10 @@ def evaluate_guardian_input(user_text: str) -> GuardianRuntimeResult:
             fail_mode=settings.guardian_fail_mode,
             error=error,
         )
+
+    # Store result in Redis cache (only clean LLM resolutions)
+    if _cache_set is not None and _cache_key_fn is not None and not reason.startswith("upstream"):
+        _cache_set(_cache_key_fn(user_text), label, settings.redis_guardian_cache_ttl)
 
     return GuardianRuntimeResult(
         is_blocked=(label == "dangerous"),

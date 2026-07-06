@@ -77,6 +77,19 @@ class Settings:
     guardian_timeout_ms: int = 1500
     guardian_fail_mode: str = "closed"
     guardian_block_message: str = "检测到潜在提示词攻击风险，本次请求已被拦截。"
+    guardian_rule_shortcircuit_enabled: bool = True
+    guardian_cache_enabled: bool = True
+    guardian_cache_size: int = 512
+    memory_v3_async_capture: bool = True
+    harness_review_sync: bool = False
+    fast_llm_provider: str | None = None
+    fast_llm_model: str | None = None
+    fast_llm_api_key: str | None = None
+    fast_llm_base_url: str | None = None
+    redis_url: str = ""
+    redis_guardian_cache_ttl: int = 3600
+    redis_embed_cache_ttl: int = 300
+    redis_recall_cache_ttl: int = 600
     component_char_limit: int = 20_000
     terminal_timeout_seconds: int = 30
     # Harness
@@ -258,6 +271,19 @@ def get_settings() -> Settings:
             os.getenv("GUARDIAN_BLOCK_MESSAGE")
             or "检测到潜在提示词攻击风险，本次请求已被拦截。"
         ),
+        guardian_rule_shortcircuit_enabled=_env_bool("GUARDIAN_RULE_SHORTCIRCUIT_ENABLED", True),
+        guardian_cache_enabled=_env_bool("GUARDIAN_CACHE_ENABLED", True),
+        guardian_cache_size=_env_int("GUARDIAN_CACHE_SIZE", 512),
+        memory_v3_async_capture=_env_bool("MEMORY_V3_ASYNC_CAPTURE", True),
+        harness_review_sync=_env_bool("HARNESS_REVIEW_SYNC", False),
+        fast_llm_provider=os.getenv("FAST_LLM_PROVIDER"),
+        fast_llm_model=os.getenv("FAST_LLM_MODEL"),
+        fast_llm_api_key=_first_env("FAST_LLM_API_KEY"),
+        fast_llm_base_url=os.getenv("FAST_LLM_BASE_URL"),
+        redis_url=os.getenv("REDIS_URL", "").strip() or "",
+        redis_guardian_cache_ttl=_env_int("REDIS_GUARDIAN_CACHE_TTL", 3600),
+        redis_embed_cache_ttl=_env_int("REDIS_EMBED_CACHE_TTL", 300),
+        redis_recall_cache_ttl=_env_int("REDIS_RECALL_CACHE_TTL", 600),
         harness_enabled=_env_bool("HARNESS_ENABLED", True),
         harness_security_enabled=_env_bool("HARNESS_SECURITY_ENABLED", True),
         harness_review_enabled=_env_bool("HARNESS_REVIEW_ENABLED", True),
