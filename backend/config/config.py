@@ -97,6 +97,15 @@ class Settings:
     harness_security_enabled: bool = True
     harness_review_enabled: bool = True
     harness_rules_path: str = "config/harness_rules.yaml"
+    # Chain pruning
+    guardian_pruning_enabled: bool = True
+    guardian_pruning_safe_threshold: int = 3
+    harness_pruning_enabled: bool = True
+    harness_review_min_response_chars: int = 50
+    # Smart routing
+    smart_routing_enabled: bool = True
+    # Parallel tool calls
+    parallel_tool_calls_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -288,6 +297,12 @@ def get_settings() -> Settings:
         harness_security_enabled=_env_bool("HARNESS_SECURITY_ENABLED", True),
         harness_review_enabled=_env_bool("HARNESS_REVIEW_ENABLED", True),
         harness_rules_path=os.getenv("HARNESS_RULES_PATH", "config/harness_rules.yaml"),
+        guardian_pruning_enabled=_env_bool("GUARDIAN_PRUNING_ENABLED", True),
+        guardian_pruning_safe_threshold=_env_int("GUARDIAN_PRUNING_SAFE_THRESHOLD", 3),
+        harness_pruning_enabled=_env_bool("HARNESS_PRUNING_ENABLED", True),
+        harness_review_min_response_chars=_env_int("HARNESS_REVIEW_MIN_RESPONSE_CHARS", 50),
+        smart_routing_enabled=_env_bool("SMART_ROUTING_ENABLED", True),
+        parallel_tool_calls_enabled=_env_bool("PARALLEL_TOOL_CALLS_ENABLED", True),
     )
 
 

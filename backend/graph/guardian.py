@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 GUARDIAN_BLACKLIST_PATTERNS: tuple[str, ...] = (
     "忽略", "ignore previous", "ignore all", "ignore the above",
     "system prompt", "your instructions", "你的指令", "你的提示词",
-    "developer mode", "developer mode", "DAN", "jailbreak",
+    "developer mode", "dan", "jailbreak",
     "扮演", "roleplay as", "now you are", "你现在是",
     "show me your prompt", "show your instructions", "reveal your",
     "无限制", "unrestricted", "bypass", "绕过",
@@ -124,7 +124,13 @@ class GuardianMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respon
     ) -> dict[str, Any] | None:
         from config import get_settings
 
-        if not get_settings().guardian_enabled:
+        settings = get_settings()
+        if not settings.guardian_enabled:
+            return None
+
+        # Pruning: skip Guardian after N consecutive safe turns
+        consecutive_safe = state.get("consecutive_safe_turns", 0)
+        if settings.guardian_pruning_enabled and consecutive_safe >= settings.guardian_pruning_safe_threshold:
             return None
 
         user_text = last_user_text_from_agent_state(state)
@@ -138,8 +144,10 @@ class GuardianMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respon
             return {
                 "jump_to": "end",
                 "messages": [AIMessage(content=result.block_message)],
+                "consecutive_safe_turns": 0,
             }
-        return None
+        # Safe — increment counter
+        return {"consecutive_safe_turns": consecutive_safe + 1}
 
     @hook_config(can_jump_to=["end"])
     @override

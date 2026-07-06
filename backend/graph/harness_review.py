@@ -212,12 +212,22 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
 
     def _do_review(self, state: AgentState[ResponseT]) -> dict[str, Any] | None:
         from config import get_settings
-        if not get_settings().harness_review_enabled:
+        settings = get_settings()
+        if not settings.harness_review_enabled:
             return None
 
         messages = state.get("messages") or []
         if len(messages) < 2:
             return None
+
+        # Pruning: skip review for short responses without tool calls
+        if settings.harness_pruning_enabled:
+            last_msg = messages[-1]
+            response_text = _extract_text(getattr(last_msg, "content", ""))
+            tool_calls = getattr(last_msg, "tool_calls", None) or []
+            if len(response_text) < settings.harness_review_min_response_chars and not tool_calls:
+                logger.debug("HarnessReview skipped: short response without tool calls")
+                return None
 
         msg_dicts = []
         for m in messages:

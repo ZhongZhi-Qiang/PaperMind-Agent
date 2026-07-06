@@ -18,6 +18,7 @@ from graph.context_offload import build_context_offload_middleware
 from graph.harness_security import build_harness_security_middleware
 from graph.harness_review import build_harness_review_middleware
 from graph.checkpointer import get_checkpointer
+from graph.parallel_tools import patch_agent_for_parallel_tools
 from service.prompt_builder import build_system_prompt
 from graph.llm import build_llm_config_from_settings, get_llm
 
@@ -213,11 +214,15 @@ def create_agent_from_config(config: AgentConfig) -> AgentGraph:
         )
     if config.harness_review_enabled:
         middleware.append(build_harness_review_middleware())
-    return create_agent(
+    agent = create_agent(
         model=config.llm,
         tools=config.tools,
         system_prompt=config.system_prompt,
         checkpointer=config.checkpointer,
         middleware=middleware if middleware else (),
     )
+    # Patch tools node for parallel execution (non-destructive: falls back if graph structure differs)
+    from graph.parallel_tools import patch_agent_for_parallel_tools
+    agent = patch_agent_for_parallel_tools(agent, config.tools)
+    return agent
 
