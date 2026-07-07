@@ -32,6 +32,8 @@ backend/raw/*
 backend/temp_*.txt
 backend/lint_report.txt
 backend/orphan_report.json
+backend/memory_module_v3/l0/
+backend/memory_module_v3/offload/refs/
 frontend/.next/
 node_modules/
 frontend/node_modules/

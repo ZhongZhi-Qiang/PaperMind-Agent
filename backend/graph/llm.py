@@ -181,11 +181,11 @@ class _DashScopeEmbeddings:
     list of str").  This class calls the DashScope API directly via httpx.
     """
 
-    def __init__(self, model: str, api_key: str):
+    def __init__(self, model: str, api_key: str, base_url: str | None = None):
         import httpx
         self._model = model
         self._api_key = api_key
-        self._base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        self._base_url = (base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
         self._client = httpx.Client(proxy=None, timeout=60.0, trust_env=False)
 
     def _call_api(self, texts: list[str]) -> list[list[float]]:
@@ -242,8 +242,9 @@ def get_embedding_model(config: ResolvedEmbeddingConfig):
     if not config.api_key:
         raise RuntimeError(f"Missing embedding API key for provider {config.provider}")
 
-    if provider in {"bailian", "dashscope", "qwen"} or "dashscope" in (config.base_url or "").lower():
-        return _DashScopeEmbeddings(model=config.model, api_key=config.api_key)
+    # DashScope and compatible endpoints (including aliyuncs.com / maas.aliyuncs.com)
+    if provider in {"bailian", "dashscope", "qwen"} or "aliyuncs.com" in (config.base_url or "").lower():
+        return _DashScopeEmbeddings(model=config.model, api_key=config.api_key, base_url=config.base_url)
 
     return OpenAIEmbeddings(model=config.model, api_key=config.api_key, base_url=config.base_url)
 

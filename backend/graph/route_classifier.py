@@ -22,7 +22,7 @@ class RouteTier(str, Enum):
 # Patterns that strongly indicate L0 (greetings, chitchat, thanks)
 # NOTE: keep patterns specific enough to avoid false matches (e.g. "hi" matches "this")
 L0_PATTERNS: tuple[str, ...] = (
-    "你好", "hello", "thanks", "thank you", "thx",
+    "你好", "谢谢", "hello", "thanks", "thank you",
     "再见", "bye", "goodbye", "see you",
     "晚安", "good night", "good morning",
     "你是谁", "who are you",

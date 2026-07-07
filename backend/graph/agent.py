@@ -232,11 +232,7 @@ class AgentManager:
                 if isinstance(usage_candidate, dict):
                     last_usage = usage_candidate
 
-                # 只转发主 agent 节点的 token；跳过 guardian middleware 等非 agent 节点的 LLM 输出
-                node = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
-                if node is not None and node != "agent":
-                    continue
-
+                # 只转发有实际文本内容的 token 事件
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
                     if _t2 is None:
@@ -302,8 +298,7 @@ class AgentManager:
 
         # --- v3 auto-capture (fire-and-forget: don't block `done` event) ---
         if memory_backend == "v3" and _v3_recorder and _v3_pipeline:
-            from config import get_settings
-            if get_settings().memory_v3_async_capture:
+            if settings.memory_v3_async_capture:
                 _spawn_background_task(_v3_capture_async(session_id, message, final_content))
             else:
                 try:

@@ -15,7 +15,6 @@ import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import get_settings
-from graph.llm import build_llm_config_from_settings, get_llm
 from service.arxiv_service import ArxivPaper
 from tools.pdf_parser_tool import _parse_pdf
 from tools.wiki_engine_tool import (
@@ -83,16 +82,6 @@ Rules:
 - If unsure whether something qualifies, include it with lower confidence.
 - Output ONLY valid JSON, no markdown code fences.
 """
-
-CHINESE_SUMMARY_PROMPT = """将以下学术论文摘要翻译为简洁的中文摘要。要求：
-1. 保留核心方法和关键贡献
-2. 使用学术中文，专有名词可保留英文
-3. 不要添加原文没有的信息
-
-Title: {title}
-Abstract: {abstract}
-
-直接输出中文摘要，不要加任何前缀或解释。"""
 
 
 TAG_CLASSIFY_PROMPT = """You are an academic research assistant. Classify the following paper into 1-3 predefined research tags.
@@ -175,24 +164,8 @@ def _download_pdf(url: str, dest_dir: Path) -> Path | None:
 
 def _get_llm():
     """Get a cached LLM instance for the digest pipeline."""
-    settings = get_settings()
-    llm_config = build_llm_config_from_settings(settings, temperature=0.3)
-    return get_llm(llm_config)
-
-
-def _generate_chinese_summary(title: str, abstract: str) -> str:
-    """Generate a concise Chinese summary of the paper abstract."""
-    llm = _get_llm()
-    prompt = CHINESE_SUMMARY_PROMPT.format(title=title, abstract=abstract[:1500])
-    try:
-        response = llm.invoke([
-            SystemMessage(content="你是学术论文摘要翻译助手。简洁准确地翻译。"),
-            HumanMessage(content=prompt),
-        ])
-        return response.content.strip()
-    except Exception as e:
-        logger.error("Chinese summary failed: %s", e)
-        return abstract[:150] + "..."
+    from graph.llm import get_fast_llm
+    return get_fast_llm(get_settings(), temperature=0.3, streaming=False)
 
 
 def _analyze_with_llm(paper: ArxivPaper, full_text: str) -> str:
@@ -543,15 +516,11 @@ def run_digest(papers: list[ArxivPaper], base_dir: Path) -> tuple[list[str], lis
         for paper in papers:
             logger.info("Processing: %s — %s", paper.arxiv_id, paper.title)
 
-            # generate Chinese summary for notification
-            chinese_summary = _generate_chinese_summary(paper.title, paper.abstract)
-
             # download PDF
             pdf_path = _download_pdf(paper.pdf_url, tmp_path)
             if pdf_path is None:
                 logger.warning("Skipping %s — PDF download failed", paper.arxiv_id)
                 d = paper.to_dict()
-                d["chinese_summary"] = chinese_summary
                 paper_dicts.append(d)
                 continue
 
@@ -580,7 +549,6 @@ def run_digest(papers: list[ArxivPaper], base_dir: Path) -> tuple[list[str], lis
                 logger.error("Failed to create wiki page for %s: %s", paper.arxiv_id, e)
 
             d = paper.to_dict()
-            d["chinese_summary"] = chinese_summary
             paper_dicts.append(d)
 
     # auto-create survey pages for topics with ≥3 papers

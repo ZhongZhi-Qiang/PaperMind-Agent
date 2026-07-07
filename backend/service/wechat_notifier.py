@@ -57,7 +57,7 @@ def _build_single_paper(p: dict, index: int) -> str:
     categories = p.get("categories", [])
     cat_str = ", ".join(categories[:3])
 
-    summary = p.get("chinese_summary") or p.get("abstract", "")
+    summary = p.get("abstract", "")
 
     arxiv_id = p.get("arxiv_id", "")
     pdf_url = p.get("pdf_url", "")

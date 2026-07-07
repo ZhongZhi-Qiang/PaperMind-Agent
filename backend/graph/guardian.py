@@ -282,6 +282,7 @@ def _request_guardian_decision(user_text: str) -> GuardianOutput:
             base_url=settings.guardian_base_url,
             temperature=0,
             timeout=timeout_seconds,
+            extra_body={"enable_thinking": False},
         )
 
     # Add explicit JSON output instruction to system prompt
