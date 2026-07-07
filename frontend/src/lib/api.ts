@@ -198,3 +198,81 @@ export async function streamChat(
     }
   }
 }
+
+export type IngestHandlers = {
+  onProgress: (stage: string, message: string) => void;
+  onDone: (data: {
+    paper_slug: string;
+    entity_slugs: string[];
+    title: string;
+    wiki_path: string;
+    entity_count: number;
+  }) => void;
+  onError: (error: string) => void;
+};
+
+export async function streamIngest(
+  payload: { file: File | null; url?: string; title?: string },
+  handlers: IngestHandlers
+) {
+  const formData = new FormData();
+  if (payload.file) formData.append("file", payload.file);
+  if (payload.url) formData.append("url", payload.url);
+  if (payload.title) formData.append("title", payload.title);
+
+  const response = await fetch(`${getApiBase()}/ingest/pdf`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Ingest request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+
+      const lines = block.split("\n");
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of lines) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length) {
+        const data = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+        if (event === "progress") {
+          handlers.onProgress(
+            String(data.stage ?? ""),
+            String(data.message ?? "")
+          );
+        } else if (event === "done") {
+          handlers.onDone({
+            paper_slug: String(data.paper_slug ?? ""),
+            entity_slugs: (data.entity_slugs as string[]) ?? [],
+            title: String(data.title ?? ""),
+            wiki_path: String(data.wiki_path ?? ""),
+            entity_count: Number(data.entity_count ?? 0),
+          });
+          return;
+        } else if (event === "error") {
+          handlers.onError(String(data.error ?? "Unknown error"));
+          return;
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+
+    if (done) break;
+  }
+}

@@ -18,6 +18,7 @@ from api.compress import router as compress_router
 from api.config_api import router as config_router
 from api.digest import router as digest_router
 from api.files import router as files_router
+from api.ingest import router as ingest_router
 from api.sessions import router as sessions_router
 from api.tokens import router as tokens_router
 from config import get_settings
@@ -55,6 +56,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(sessions_router, prefix="/api", tags=["sessions"])
 app.include_router(files_router, prefix="/api", tags=["files"])
+app.include_router(ingest_router, prefix="/api", tags=["ingest"])
 app.include_router(tokens_router, prefix="/api", tags=["tokens"])
 app.include_router(compress_router, prefix="/api", tags=["compress"])
 app.include_router(config_router, prefix="/api", tags=["config"])

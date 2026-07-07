@@ -16,6 +16,7 @@ import {
   saveFile,
   setRagMode,
   streamChat,
+  streamIngest,
   type RetrievalResult,
   type SessionSummary,
   type ToolCall
@@ -51,7 +52,7 @@ type AppStore = {
   tokenStats: TokenStats | null;
   createNewSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
-  sendMessage: (value: string) => Promise<void>;
+  sendMessage: (value: string, file?: File) => Promise<void>;
   toggleRagMode: () => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
@@ -149,16 +150,82 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return created.id;
   }
 
-  async function sendMessage(value: string) {
-    if (!value.trim() || isStreaming) {
+  async function sendMessage(value: string, file?: File) {
+    if ((!value.trim() && !file) || isStreaming) {
       return;
     }
 
     const sessionId = await ensureSession();
+
+    // If a file is attached, ingest it first
+    let ingestCtx = "";
+    if (file) {
+      const ingestMessage: Message = {
+        id: makeId(),
+        role: "assistant",
+        content: "",
+        toolCalls: [],
+        retrievals: [],
+      };
+      setMessages((prev) => [...prev, ingestMessage]);
+      const ingestId = ingestMessage.id;
+
+      try {
+        await streamIngest(
+          { file, title: value.trim() || undefined },
+          {
+            onProgress(stage, message) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === ingestId
+                    ? { ...m, content: `${m.content}[${stage}] ${message}\n` }
+                    : m
+                )
+              );
+            },
+            onDone(data) {
+              ingestCtx = `已入库论文: ${data.title} (wiki/${data.wiki_path})`;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === ingestId
+                    ? {
+                        ...m,
+                        content: `论文已入库: **${data.title}**\nwiki 路径: \`${data.wiki_path}\`\n实体数: ${data.entity_count}`,
+                      }
+                    : m
+                )
+              );
+            },
+            onError(error) {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === ingestId
+                    ? { ...m, content: `上传失败: ${error}` }
+                    : m
+                )
+              );
+            },
+          }
+        );
+      } catch (e) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === ingestId
+              ? { ...m, content: `上传失败: ${String(e)}` }
+              : m
+          )
+        );
+        return;
+      }
+    }
+    const messageContent = ingestCtx
+      ? `${ingestCtx}\n\n${value.trim() || "请帮我分析这篇论文"}`
+      : value.trim();
+
     const userMessage: Message = {
       id: makeId(),
       role: "user",
-      content: value.trim(),
+      content: messageContent,
       toolCalls: [],
       retrievals: []
     };

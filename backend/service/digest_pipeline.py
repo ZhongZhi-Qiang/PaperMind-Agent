@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config import get_settings
 from service.arxiv_service import ArxivPaper
 from tools.pdf_parser_tool import _parse_pdf
+from tools.mineru_client import parse_via_mineru
 from tools.wiki_engine_tool import (
     SaveWikiPageTool,
     RegisterSourceTool,
@@ -501,6 +502,18 @@ def _check_and_create_surveys(base_dir: Path) -> list[str]:
     return created
 
 
+def _parse_via_mineru(pdf_url: str, settings) -> dict:
+    """Parse a document URL via MinerU API. Returns _parse_pdf-compatible dict or {"error": "..."}."""
+    return parse_via_mineru(
+        pdf_url,
+        base_url=settings.mineru_base_url,
+        token=settings.mineru_token,
+        model_version=settings.mineru_default_model,
+        poll_interval=settings.mineru_poll_interval,
+        max_wait=settings.mineru_max_wait,
+    )
+
+
 def run_digest(papers: list[ArxivPaper], base_dir: Path) -> tuple[list[str], list[dict]]:
     """Process a batch of arXiv papers: download, parse, analyze, create wiki pages.
 
@@ -516,7 +529,22 @@ def run_digest(papers: list[ArxivPaper], base_dir: Path) -> tuple[list[str], lis
         for paper in papers:
             logger.info("Processing: %s — %s", paper.arxiv_id, paper.title)
 
-            # download PDF
+            settings = get_settings()
+            full_text = paper.abstract  # fallback default
+
+            # ── primary: MinerU via arXiv URL ──
+            if settings.mineru_token:
+                try:
+                    parsed = _parse_via_mineru(paper.pdf_url, settings)
+                    if "error" not in parsed:
+                        full_text = parsed.get("full_text", paper.abstract)
+                        logger.info("MinerU parsed %s: %d chars", paper.arxiv_id, len(full_text))
+                    else:
+                        logger.warning("MinerU failed for %s: %s", paper.arxiv_id, parsed["error"])
+                except Exception as e:
+                    logger.warning("MinerU exception for %s: %s", paper.arxiv_id, e)
+
+            # download PDF for source registration (always needed for SHA-256)
             pdf_path = _download_pdf(paper.pdf_url, tmp_path)
             if pdf_path is None:
                 logger.warning("Skipping %s — PDF download failed", paper.arxiv_id)
@@ -524,9 +552,10 @@ def run_digest(papers: list[ArxivPaper], base_dir: Path) -> tuple[list[str], lis
                 paper_dicts.append(d)
                 continue
 
-            # parse PDF for full text
-            parsed = _parse_pdf(str(pdf_path))
-            full_text = parsed.get("full_text", paper.abstract)
+            # ── fallback: PyMuPDF if MinerU did not provide full_text ──
+            if full_text == paper.abstract:
+                parsed_local = _parse_pdf(str(pdf_path))
+                full_text = parsed_local.get("full_text", paper.abstract)
 
             # LLM analysis
             analysis = _analyze_with_llm(paper, full_text)

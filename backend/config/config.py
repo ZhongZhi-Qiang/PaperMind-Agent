@@ -106,6 +106,12 @@ class Settings:
     smart_routing_enabled: bool = True
     # Parallel tool calls
     parallel_tool_calls_enabled: bool = True
+    # MinerU document parser
+    mineru_token: str | None = None
+    mineru_base_url: str = "https://mineru.net/api/v4"
+    mineru_poll_interval: int = 3
+    mineru_max_wait: int = 300
+    mineru_default_model: str = "vlm"
 
 
 @dataclass(frozen=True)
@@ -303,6 +309,12 @@ def get_settings() -> Settings:
         harness_review_min_response_chars=_env_int("HARNESS_REVIEW_MIN_RESPONSE_CHARS", 50),
         smart_routing_enabled=_env_bool("SMART_ROUTING_ENABLED", True),
         parallel_tool_calls_enabled=_env_bool("PARALLEL_TOOL_CALLS_ENABLED", True),
+        # MinerU document parser
+        mineru_token=_first_env("MINERU_TOKEN"),
+        mineru_base_url=_first_env("MINERU_BASE_URL", "MINERU_API_URL") or "https://mineru.net/api/v4",
+        mineru_poll_interval=_env_int("MINERU_POLL_INTERVAL", 3),
+        mineru_max_wait=_env_int("MINERU_MAX_WAIT", 300),
+        mineru_default_model=_first_env("MINERU_MODEL") or "vlm",
     )
 
 

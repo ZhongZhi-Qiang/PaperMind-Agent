@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import traceback
 from typing import Any
@@ -12,6 +11,7 @@ from pydantic import BaseModel, Field
 from graph.context import build_request_context
 from graph.agent import agent_manager
 from graph.checkpointer import reconnect_checkpointer_async
+from api.sse_event_utils import sse_event
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,6 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     session_id: str
     stream: bool = True
-
-
-def _sse(event: str, data: dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _new_segment() -> dict[str, Any]:
@@ -102,13 +98,13 @@ async def chat(payload: ChatRequest):
                             )
 
                     data = {key: value for key, value in event.items() if key != "type"}
-                    yield _sse(event_type, data)
+                    yield sse_event(event_type, data)
 
                     if event_type == "done":
                         if is_first_user_message:
                             title = await agent_manager.generate_title(payload.message)
                             session_manager.set_title(payload.session_id, title)
-                            yield _sse(
+                            yield sse_event(
                                 "title",
                                 {"session_id": payload.session_id, "title": title},
                             )
@@ -128,7 +124,7 @@ async def chat(payload: ChatRequest):
 
                 print("[chat] error in event_generator", repr(exc))
                 traceback.print_exc()
-                yield _sse("error", {"error": str(exc)})
+                yield sse_event("error", {"error": str(exc)})
                 return
 
     if payload.stream:
