@@ -95,8 +95,8 @@ LLM_REGISTRY: Dict[str, Callable[[ResolvedLLMConfig], BaseChatModel]] = {
     # "bailian": _build_tongyi_chat,
     # "dashscope": _build_tongyi_chat,
     # "qwen": _build_tongyi_chat,
-    # DeepSeek 专用客户端
-    "deepseek": _build_deepseek_chat,
+    # DeepSeek：使用 OpenAI 兼容接口（原生 function calling 支持更好）
+    "deepseek": _build_openai_compatible_chat,
 }
 
 

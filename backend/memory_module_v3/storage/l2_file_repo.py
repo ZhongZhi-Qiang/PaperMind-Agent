@@ -77,6 +77,19 @@ class L2FileRepo:
             return file_path.read_text(encoding="utf-8")
         return None
 
+    def get_all_with_content(self) -> list[dict[str, Any]]:
+        """Return all scenes with full content (for incremental L2 context)."""
+        result = []
+        for entry in self._read_index():
+            file_path = self._dir / entry["file"]
+            content_md = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            result.append({
+                "scene_name": entry["scene_name"],
+                "content_md": content_md,
+                "fact_count": entry.get("fact_count", 0),
+            })
+        return result
+
     def list_names(self) -> list[str]:
         """Return sorted scene names."""
         return sorted(item["scene_name"] for item in self._read_index())

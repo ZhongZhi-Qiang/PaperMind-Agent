@@ -77,19 +77,6 @@ class Settings:
     guardian_timeout_ms: int = 1500
     guardian_fail_mode: str = "closed"
     guardian_block_message: str = "检测到潜在提示词攻击风险，本次请求已被拦截。"
-    guardian_rule_shortcircuit_enabled: bool = True
-    guardian_cache_enabled: bool = True
-    guardian_cache_size: int = 512
-    memory_v3_async_capture: bool = True
-    harness_review_sync: bool = False
-    fast_llm_provider: str | None = None
-    fast_llm_model: str | None = None
-    fast_llm_api_key: str | None = None
-    fast_llm_base_url: str | None = None
-    redis_url: str = ""
-    redis_guardian_cache_ttl: int = 3600
-    redis_embed_cache_ttl: int = 300
-    redis_recall_cache_ttl: int = 600
     component_char_limit: int = 20_000
     terminal_timeout_seconds: int = 30
     # Harness
@@ -97,13 +84,30 @@ class Settings:
     harness_security_enabled: bool = True
     harness_review_enabled: bool = True
     harness_rules_path: str = "config/harness_rules.yaml"
+    # Redis
+    redis_url: str = ""
+    redis_guardian_cache_ttl: int = 3600
+    redis_embed_cache_ttl: int = 300
+    redis_recall_cache_ttl: int = 600
+    # Guardian cache
+    guardian_cache_enabled: bool = True
+    guardian_cache_size: int = 512
+    guardian_rule_shortcircuit_enabled: bool = True
+    # Fast LLM
+    fast_llm_provider: str | None = None
+    fast_llm_model: str | None = None
+    fast_llm_api_key: str | None = None
+    fast_llm_base_url: str | None = None
+    # Memory v3
+    memory_v3_async_capture: bool = True
+    memory_v3_inject: str = "always"
+    memory_v3_inject_top_k: int = 5
     # Chain pruning
     guardian_pruning_enabled: bool = True
     guardian_pruning_safe_threshold: int = 3
     harness_pruning_enabled: bool = True
     harness_review_min_response_chars: int = 50
-    # Smart routing
-    smart_routing_enabled: bool = True
+    harness_review_sync: bool = False
     # Parallel tool calls
     parallel_tool_calls_enabled: bool = True
     # MinerU document parser
@@ -286,28 +290,35 @@ def get_settings() -> Settings:
             os.getenv("GUARDIAN_BLOCK_MESSAGE")
             or "检测到潜在提示词攻击风险，本次请求已被拦截。"
         ),
-        guardian_rule_shortcircuit_enabled=_env_bool("GUARDIAN_RULE_SHORTCIRCUIT_ENABLED", True),
-        guardian_cache_enabled=_env_bool("GUARDIAN_CACHE_ENABLED", True),
-        guardian_cache_size=_env_int("GUARDIAN_CACHE_SIZE", 512),
-        memory_v3_async_capture=_env_bool("MEMORY_V3_ASYNC_CAPTURE", True),
-        harness_review_sync=_env_bool("HARNESS_REVIEW_SYNC", False),
-        fast_llm_provider=os.getenv("FAST_LLM_PROVIDER"),
-        fast_llm_model=os.getenv("FAST_LLM_MODEL"),
-        fast_llm_api_key=_first_env("FAST_LLM_API_KEY"),
-        fast_llm_base_url=os.getenv("FAST_LLM_BASE_URL"),
-        redis_url=os.getenv("REDIS_URL", "").strip() or "",
-        redis_guardian_cache_ttl=_env_int("REDIS_GUARDIAN_CACHE_TTL", 3600),
-        redis_embed_cache_ttl=_env_int("REDIS_EMBED_CACHE_TTL", 300),
-        redis_recall_cache_ttl=_env_int("REDIS_RECALL_CACHE_TTL", 600),
         harness_enabled=_env_bool("HARNESS_ENABLED", True),
         harness_security_enabled=_env_bool("HARNESS_SECURITY_ENABLED", True),
         harness_review_enabled=_env_bool("HARNESS_REVIEW_ENABLED", True),
         harness_rules_path=os.getenv("HARNESS_RULES_PATH", "config/harness_rules.yaml"),
+        # Redis
+        redis_url=os.getenv("REDIS_URL", ""),
+        redis_guardian_cache_ttl=_env_int("REDIS_GUARDIAN_CACHE_TTL", 3600),
+        redis_embed_cache_ttl=_env_int("REDIS_EMBED_CACHE_TTL", 300),
+        redis_recall_cache_ttl=_env_int("REDIS_RECALL_CACHE_TTL", 600),
+        # Guardian cache / pruning
+        guardian_cache_enabled=_env_bool("GUARDIAN_CACHE_ENABLED", True),
+        guardian_cache_size=_env_int("GUARDIAN_CACHE_SIZE", 512),
+        guardian_rule_shortcircuit_enabled=_env_bool("GUARDIAN_RULE_SHORTCIRCUIT_ENABLED", True),
         guardian_pruning_enabled=_env_bool("GUARDIAN_PRUNING_ENABLED", True),
         guardian_pruning_safe_threshold=_env_int("GUARDIAN_PRUNING_SAFE_THRESHOLD", 3),
+        # Fast LLM
+        fast_llm_provider=os.getenv("FAST_LLM_PROVIDER") or None,
+        fast_llm_model=os.getenv("FAST_LLM_MODEL") or None,
+        fast_llm_api_key=_first_env("FAST_LLM_API_KEY"),
+        fast_llm_base_url=os.getenv("FAST_LLM_BASE_URL") or None,
+        # Memory v3
+        memory_v3_async_capture=_env_bool("MEMORY_V3_ASYNC_CAPTURE", True),
+        memory_v3_inject=os.getenv("MEMORY_V3_INJECT", "always"),
+        memory_v3_inject_top_k=_env_int("MEMORY_V3_INJECT_TOP_K", 5),
+        # Harness pruning
         harness_pruning_enabled=_env_bool("HARNESS_PRUNING_ENABLED", True),
         harness_review_min_response_chars=_env_int("HARNESS_REVIEW_MIN_RESPONSE_CHARS", 50),
-        smart_routing_enabled=_env_bool("SMART_ROUTING_ENABLED", True),
+        harness_review_sync=_env_bool("HARNESS_REVIEW_SYNC", False),
+        # Parallel tool calls
         parallel_tool_calls_enabled=_env_bool("PARALLEL_TOOL_CALLS_ENABLED", True),
         # MinerU document parser
         mineru_token=_first_env("MINERU_TOKEN"),

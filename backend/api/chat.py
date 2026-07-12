@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from graph.context import build_request_context
 from graph.agent import agent_manager
 from graph.checkpointer import reconnect_checkpointer_async
-from api.sse_event_utils import sse_event
+from api._sse_utils import sse_event
 
 logger = logging.getLogger(__name__)
 

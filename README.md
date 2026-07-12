@@ -45,6 +45,20 @@
 
 基于 `SKILL.md` 文件的可扩展框架，10 个内置技能：`ideate`（研究 idea 生成）、`paper-ingest`（论文导入）、`paper-update`（增量更新）、`quick-lookup`（快速检索）、`rag-skill`（本地 RAG）、`web-search`（网页搜索）、`wiki-ask`（Wiki 检索问答）、`wiki-lint`（Wiki 健康检查）等。
 
+### 延迟优化体系
+
+五项优化策略协同作用，将端到端 Total 延迟中位数从 120s 降至 5.8s（**-95%**），TTFT 中位数降低 23%：
+
+| 策略 | 核心思路 | 收益（Total 中位数） |
+|------|---------|---------------------|
+| **多级缓存** | Guardian 关键词 / Embedding 量化 / Recall 结果 / 内存四级缓存 | 缓存命中节省 LLM 调用（200-800ms）+ 向量检索（100-300ms） |
+| **上下文压缩** | Auto-Capture + HarnessReview 异步 fire-and-forget | 用户感知延迟减少 300-800ms |
+| **智能路由** | L0 寒暄 / L1 知识问答 / L2 复杂任务三级分流的规则分类器（<1ms） | L0: -90% / L1: -92% / L2: -94% |
+| **并行工具调用** | 多工具 asyncio.gather 并发执行，耗时从 sum 降为 max | N 个工具加速比接近 N |
+| **链路剪枝** | Guardian 连续 safe 跳过 + 黑名单短路 + HarnessReview 短回复跳过 | 每次跳过节省 200-800ms |
+
+> 详细设计思路、实现方式与 E2E 对比数据见 **[延迟优化策略详解](docs/latency_optimization_summary.md)**
+
 ## 技术架构
 
 ```
@@ -61,6 +75,8 @@
 │  Middleware Chain (按序执行):                          │
 │  Guardian → HarnessSecurity → ContextOffload          │
 │  → Summarization → HarnessReview                     │
+├─────────────────────────────────────────────────────┤
+│  延迟优化: 智能路由 + 并行工具 + 多级缓存 + 链路剪枝      │
 ├─────────────────────────────────────────────────────┤
 │  Agent Tools (13+):                                  │
 │  terminal | python_repl | fetch_url | read_file      │
@@ -157,6 +173,16 @@ pytest tests/test_harness_review.py     # 审查中间件（11 个用例）
 | `ARXIV_DIGEST_ENABLED` | 启用 arXiv 每日消化 | `true`（默认）/ `false` |
 | `ARXIV_DIGEST_HOUR` | 消化执行时间（小时） | 默认 `8`（Asia/Shanghai） |
 | `WECHAT_WEBHOOK_KEY` | 企业微信推送 Webhook | — |
+| `REDIS_URL` | Redis 缓存连接 | `redis://localhost:6379/0` |
+| `SMART_ROUTING_ENABLED` | 智能路由（L0/L1/L2 分流） | `true` / `false` |
+| `PARALLEL_TOOL_CALLS_ENABLED` | 并行工具调用 | `true` / `false` |
+| `GUARDIAN_RULE_SHORTCIRCUIT_ENABLED` | Guardian 黑名单短路 | `true` / `false` |
+| `GUARDIAN_CACHE_ENABLED` | Guardian 关键词缓存 | `true` / `false` |
+| `GUARDIAN_PRUNING_ENABLED` | Guardian 连续安全剪枝 | `true` / `false` |
+| `MEMORY_V3_ASYNC_CAPTURE` | Auto-Capture 异步化 | `true` / `false` |
+| `HARNESS_PRUNING_ENABLED` | HarnessReview 短回复剪枝 | `true` / `false` |
+| `HARNESS_REVIEW_SYNC` | Review 同步模式（false=异步） | `true` / `false` |
+| `FAST_LLM_PROVIDER` | 轻量任务独立模型供应商 | 可选，空则降级为主 LLM |
 
 ### 供应商别名
 
@@ -213,11 +239,13 @@ PaperMind-Agent/
 │   ├── graph/                  # Agent 核心
 │   │   ├── agent.py            # AgentManager 单例（编排 recall/capture/streaming）
 │   │   ├── agent_factory.py    # 中间件链组装 + Agent 构建
-│   │   ├── guardian.py         # 提示词注入防御（LLM 分类器）
+│   │   ├── guardian.py         # 提示词注入防御（LLM 分类器 + 黑名单短路 + 剪枝）
 │   │   ├── harness_security.py # 工具级安全拦截（YAML 热加载）
-│   │   ├── harness_review.py   # 后置质量审查（LLM 五维评分）
+│   │   ├── harness_review.py   # 后置质量审查（LLM 五维评分 + 剪枝）
 │   │   ├── context_offload.py  # 上下文压缩中间件
-│   │   ├── llm.py              # LLM/Embedding 工厂（多供应商）
+│   │   ├── llm.py              # LLM/Embedding 工厂（多供应商 + Fast LLM 路由）
+│   │   ├── route_classifier.py # 智能路由分类器（L0/L1/L2 规则匹配）
+│   │   ├── parallel_tools.py   # 并行工具调用节点（asyncio.gather）
 │   │   └── checkpointer.py     # 双模式状态持久化
 │   ├── memory_module_v3/       # 双轨记忆系统
 │   │   ├── capture/            # L0 自动捕获
@@ -248,7 +276,7 @@ PaperMind-Agent/
 │       ├── app/                # Next.js 页面
 │       ├── components/         # React 组件（chat/editor/layout）
 │       └── lib/                # 状态管理与 API 客户端
-└── scripts/                    # 工具脚本
+└── scripts/                    # 工具脚本（含 E2E 延迟 benchmark）
 ```
 
 ## 许可证

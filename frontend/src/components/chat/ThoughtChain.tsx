@@ -31,12 +31,7 @@ export function ThoughtChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                   <pre className="mono whitespace-pre-wrap break-all">{toolCall.input}</pre>
                 </div>
               )}
-              {toolCall.output && (
-                <div className="rounded-2xl bg-[rgba(13,37,48,0.06)] p-3">
-                  <div className="mb-1 font-medium text-[var(--color-ink-soft)]">Output</div>
-                  <div className="mono whitespace-pre-wrap break-all max-h-60 overflow-y-auto">{toolCall.output}</div>
-                </div>
-              )}
+              {/* 工具输出不展示给用户，仅 LLM 内部使用 */}
             </div>
           </div>
         ))}

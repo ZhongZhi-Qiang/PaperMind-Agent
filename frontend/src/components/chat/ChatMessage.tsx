@@ -20,6 +20,22 @@ export function ChatMessage({
 }) {
   const isUser = role === "user";
 
+  // Strip any tool output that leaked into the displayed content
+  let displayContent = content;
+  if (!isUser && toolCalls.length > 0 && displayContent) {
+    for (const tc of toolCalls) {
+      const out = (tc.output ?? "").trim();
+      if (out && displayContent.trim().startsWith(out)) {
+        displayContent = displayContent.trim().slice(out.length).trim();
+        break;
+      }
+    }
+  }
+
+  // If content is only tool output, don't show it as chat text
+  const isPureToolOutput = !isUser && toolCalls.length > 0
+    && toolCalls.some(tc => (tc.output ?? "").trim() === content.trim());
+
   return (
     <article
       className={`max-w-[90%] rounded-[28px] px-5 py-4 ${
@@ -30,20 +46,18 @@ export function ChatMessage({
     >
       {!isUser && <RetrievalCard results={retrievals} />}
       {!isUser && <ThoughtChain toolCalls={toolCalls} />}
-      {(!isUser && toolCalls.length > 0 && (!content || content.trim() === "") && !toolCalls.some(tc => tc.output === content)) ? null : (
-        (content && content.trim() !== "" && (!toolCalls.length || !toolCalls.some(tc => tc.output.trim() === content.trim()))) && (
-          <div className={isUser ? "whitespace-pre-wrap leading-7" : "markdown"}>
-            {isUser ? (
-              content
-            ) : (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {content}
-              </ReactMarkdown>
-            )}
-          </div>
-        )
+      {!isPureToolOutput && displayContent && displayContent.trim() !== "" && (
+        <div className={isUser ? "whitespace-pre-wrap leading-7" : "markdown"}>
+          {isUser ? (
+            displayContent
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {displayContent}
+            </ReactMarkdown>
+          )}
+        </div>
       )}
-      {!isUser && (!content || content.trim() === "") && !toolCalls.length && (
+      {!isUser && (!displayContent || displayContent.trim() === "") && !toolCalls.length && (
         <div className="text-[var(--color-ink-soft)]">正在思考...</div>
       )}
     </article>

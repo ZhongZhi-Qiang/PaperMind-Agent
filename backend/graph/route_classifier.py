@@ -30,27 +30,29 @@ L0_PATTERNS: tuple[str, ...] = (
 
 # Tools classified as read-only (safe for L1)
 L1_READONLY_TOOLS: set[str] = {
-    "ReadFile", "FetchURL", "QueryWiki",
+    "read_file", "fetch_url", "query_wiki",
     "search_memory", "search_memory_v3", "read_scene",
-    "ListWikiPages", "ReadWikiPage",
+    "list_wiki_pages", "read_wiki_page",
 }
 
 # Patterns that indicate L2 (code execution, file writes, multi-step tasks)
+# NOTE: be specific — avoid matching read-only queries like "wiki中有多少论文"
 L2_PATTERNS: tuple[str, ...] = (
+    # Write / create / organize operations
     "运行", "execute", "run the code", "执行",
     "写文件", "write file", "create file", "保存", "save",
     "修改", "modify", "edit", "change the",
     "删除", "delete", "remove",
+    "整理", "组织", "organize",
+    "上传", "upload",
+    "创建", "create a", "新建",
     "生成", "generate", "汇总",
     "终端", "terminal", "bash", "command",
     "python", "写代码", "write code",
-    "wiki", "register source", "save wiki",
+    "register source", "save wiki", "wiki整理", "wiki创建",
     "解析pdf", "parse pdf", "解析论文",
-    "创建", "create a", "新建",
-    "全部", "所有", "all the", "everything",
-    "分析", "analyze", "比较", "compare",
-    "复现", "reproduce", "实现", "implement",
     "安装", "install", "部署", "deploy",
+    "复现", "reproduce", "实现", "implement",
 )
 
 
@@ -75,13 +77,19 @@ def classify_query(message: str) -> RouteTier:
         if pat in lowered:
             return RouteTier.L2
 
-    # Short questions with question marks → L1
-    if ("?" in lowered or "？" in lowered) and len(lowered) < 100:
+    # Short questions with question marks → L1 (knowledge QA)
+    if ("?" in lowered or "？" in lowered) and len(lowered) < 150:
         return RouteTier.L1
 
     # Long messages → L2 (conservative)
     if len(lowered) > 200:
         return RouteTier.L2
+
+    # Contains action verbs suggesting complex task → L2
+    _action_indicators = ("帮我", "请帮我", "能不能", "可以帮我", "please", "can you")
+    for ind in _action_indicators:
+        if ind in lowered:
+            return RouteTier.L2
 
     # Default: L1 (knowledge QA)
     return RouteTier.L1

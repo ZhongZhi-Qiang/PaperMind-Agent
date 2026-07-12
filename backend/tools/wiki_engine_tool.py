@@ -453,18 +453,21 @@ class ReadWikiPageTool(BaseTool):
 class ListWikiPagesInput(BaseModel):
     entity_type: str = Field(
         default="",
-        description="Filter by entity type. Empty returns all types.",
+        description="Filter by entity type (paper/concept/method/dataset/author/survey/comparison/idea). Empty returns all types.",
     )
     keyword: str = Field(default="", description="Optional keyword filter (matches title or tags).")
+    max_results: int = Field(default=100, description="Max results to return (default 100). Set to 0 for count only.")
 
 
 class ListWikiPagesTool(BaseTool):
-    """List wiki pages, optionally filtered by entity type and keyword."""
+    """List wiki pages with type counts and optional filtering."""
 
     name: str = "list_wiki_pages"
     description: str = (
-        "List wiki pages. Filter by entity_type (paper, concept, method, etc.) "
-        "and/or keyword. Returns JSON array with slug, title, type, status."
+        "List wiki pages. Returns type_counts (summary per entity type) + pages array "
+        "(limited by max_results, default 100). Use entity_type to filter by type, "
+        "keyword to search by title/tags. Valid types: paper, concept, method, dataset, "
+        "author, survey, comparison, idea."
     )
     args_schema: Type[BaseModel] = ListWikiPagesInput
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -474,9 +477,10 @@ class ListWikiPagesTool(BaseTool):
         super().__init__(**kwargs)
         self._root_dir = root_dir.resolve()
 
-    def _run(self, entity_type: str = "", keyword: str = "", run_manager=None) -> str:
+    def _run(self, entity_type: str = "", keyword: str = "", max_results: int = 100, run_manager=None) -> str:
         wiki_dir = self._root_dir / "wiki"
         pages: list[dict] = []
+        type_counts: dict[str, int] = {}
 
         types_to_scan = (
             {entity_type: ENTITY_TYPES[entity_type]}
@@ -486,7 +490,9 @@ class ListWikiPagesTool(BaseTool):
 
         for etype, subdir in types_to_scan.items():
             type_dir = wiki_dir / subdir
+            count = 0
             if not type_dir.exists():
+                type_counts[etype] = 0
                 continue
             for md_file in sorted(type_dir.glob("*.md")):
                 text = md_file.read_text(encoding="utf-8")
@@ -500,19 +506,30 @@ class ListWikiPagesTool(BaseTool):
                     if kw not in title.lower() and not any(kw in str(t).lower() for t in tags):
                         continue
 
-                pages.append({
-                    "slug": md_file.stem,
-                    "title": title,
-                    "type": etype,
-                    "status": status,
-                    "tags": tags,
-                    "path": str(md_file.relative_to(self._root_dir)).replace("\\", "/"),
-                })
+                count += 1
 
-        return json.dumps(pages, ensure_ascii=False, indent=2)
+                if max_results > 0 and len(pages) < max_results:
+                    pages.append({
+                        "slug": md_file.stem,
+                        "title": title,
+                        "type": etype,
+                        "status": status,
+                        "tags": tags,
+                        "path": str(md_file.relative_to(self._root_dir)).replace("\\", "/"),
+                    })
+            type_counts[etype] = count
 
-    async def _arun(self, entity_type: str = "", keyword: str = "", run_manager=None) -> str:
-        return await asyncio.to_thread(self._run, entity_type, keyword, None)
+        total = sum(type_counts.values())
+        result: dict = {"total": total, "type_counts": type_counts}
+        if max_results > 0:
+            result["shown"] = len(pages)
+            result["truncated"] = total > len(pages)
+            result["pages"] = pages
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    async def _arun(self, entity_type: str = "", keyword: str = "", max_results: int = 100, run_manager=None) -> str:
+        return await asyncio.to_thread(self._run, entity_type, keyword, max_results, None)
 
 
 # ---------------------------------------------------------------------------

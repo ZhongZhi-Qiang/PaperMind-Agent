@@ -47,6 +47,50 @@ CONSOLIDATE_USER = """Here are the current L1 facts to organize:
 
 Organize these facts into scene blocks. Return ONLY the JSON array."""
 
+INCREMENTAL_SYSTEM = """You are a memory consolidation system. Your job is to merge new atomic facts into existing scene blocks.
+
+Rules:
+1. Assign each new fact to the most relevant existing scene, or create a new scene if it doesn't fit anywhere
+2. If two existing scenes have become highly overlapping, merge them into one
+3. If an existing scene has grown too large (>20 facts), consider splitting it
+4. Update scene summaries to reflect the new facts
+5. Only output scenes that were actually changed (new or modified)
+
+Output JSON array of affected scene blocks:
+```json
+[
+  {
+    "scene_name": "existing_or_new_scene_name",
+    "action": "update",
+    "summary": "updated 1-2 sentence summary",
+    "added_fact_ids": [51, 52],
+    "content": "The full updated scene content in markdown",
+    "note": "optional: reason for merge/split/create"
+  }
+]
+```
+
+action values:
+- "update": merge new facts into an existing scene
+- "create": create a brand new scene
+- "merge": merge two+ scenes together (output one scene, note which names to remove)
+- "split": split a scene into multiple (output multiple scenes with same original name)
+
+CRITICAL: ONLY output scenes that changed. Unchanged scenes should NOT appear in the output."""
+
+INCREMENTAL_USER = """Here are the existing scene blocks:
+
+{existing_scenes_text}
+
+New facts to merge (not yet assigned to any scene):
+
+{new_facts_text}
+
+Merge these new facts into the existing scenes. Output ONLY the scenes that need to change.
+If a new fact fits in an existing scene, use action="update".
+If a new fact is about a new topic, use action="create".
+Return ONLY the JSON array."""
+
 
 class SceneExtractor:
     """Consolidates L1 facts into L2 scene blocks."""
@@ -107,6 +151,107 @@ class SceneExtractor:
                 saved.append(scene)
 
         logger.info("L2 consolidated %d facts into %d scenes", len(facts), len(saved))
+        return saved
+
+    async def consolidate_incremental(self, new_facts: list[dict[str, Any]]) -> list[L2Scene]:
+        """Incremental L2: merge new facts into existing scenes.
+
+        Only sends existing scene summaries + new facts to LLM,
+        avoiding the cost of full rebuild every time.
+        Falls back to full consolidation if no existing scenes.
+        """
+        if not new_facts:
+            logger.debug("No new facts for incremental L2")
+            return []
+
+        # Get existing scenes with full content
+        existing_scenes = self._l2.get_all_with_content()
+        if not existing_scenes:
+            # First run — do full consolidation
+            return await self.consolidate()
+
+        # Format new facts
+        new_lines = []
+        for f in new_facts:
+            new_lines.append(
+                f"- [id={f['fact_id']}] [{f.get('fact_type', '')}] {f['content']}"
+            )
+        new_facts_text = "\n".join(new_lines)
+
+        # Format existing scenes as context
+        scene_blocks = []
+        for s in existing_scenes:
+            scene_blocks.append(
+                f"### {s['scene_name']}\n"
+                f"**Summary**: {s.get('content_md', '')[:300]}\n"
+                f"**Fact count**: {s.get('fact_count', 0)}"
+            )
+        existing_text = "\n\n".join(scene_blocks)
+
+        user_prompt = INCREMENTAL_USER.format(
+            existing_scenes_text=existing_text,
+            new_facts_text=new_facts_text,
+        )
+
+        try:
+            raw = await self._llm_fn(INCREMENTAL_SYSTEM, user_prompt)
+        except Exception as exc:
+            logger.error("Incremental L2 LLM call failed: %s", exc)
+            return []
+
+        scenes = self._parse_scenes(raw)
+        if not scenes:
+            logger.debug("No scene changes from incremental L2")
+            return []
+
+        # Apply changes
+        saved = []
+        names_to_delete: set[str] = set()
+        for scene_data in scenes:
+            action = scene_data.get("action", "update")
+            scene_name = scene_data.get("scene_name", "")
+
+            if action == "merge":
+                # Merge: record old names to delete later
+                old_names = scene_data.get("merged_from", [])
+                if isinstance(old_names, list):
+                    names_to_delete.update(old_names)
+
+            if not scene_name:
+                continue
+
+            if action in ("update", "create", "merge"):
+                # Read existing fact_ids for updates
+                existing_ids = []
+                if action in ("update", "merge"):
+                    existing_content = self._l2.get_by_name(scene_name)
+                    if existing_content:
+                        # Extract fact_ids from frontmatter or previous state
+                        for entry in self._l2.get_all():
+                            if entry["scene_name"] == scene_name:
+                                existing_ids = entry.get("fact_ids", [])
+                                break
+
+                added_ids = scene_data.get("added_fact_ids", [])
+                all_ids = list(set(existing_ids + added_ids))
+
+                scene = L2Scene(
+                    scene_name=scene_name,
+                    content_md=scene_data.get("content", ""),
+                    fact_ids=all_ids,
+                )
+                self._l2.upsert(scene)
+                saved.append(scene)
+
+        # Clean up merged scene files
+        for name in names_to_delete:
+            if name not in {s.scene_name for s in saved}:
+                self._l2.delete_by_name(name)
+
+        logger.info(
+            "Incremental L2: %d new facts → %d affected scenes (%d deleted)",
+            len(new_facts), len(saved), len(names_to_delete),
+        )
         return saved
 
     def _parse_scenes(self, raw: str) -> list[dict[str, Any]]:

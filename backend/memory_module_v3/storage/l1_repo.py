@@ -145,6 +145,25 @@ class L1Repo:
         finally:
             put_connection(conn)
 
+    def get_since(self, since: datetime, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Fetch facts created or updated after a given timestamp (for incremental L2)."""
+        sql = """
+            SELECT fact_id, content, fact_type, priority, scene_name,
+                   source_msg_ids, timestamps, created_at, session_id
+            FROM memory_v3.l1_facts
+            WHERE created_at > %s
+            ORDER BY created_at ASC
+            LIMIT %s
+        """
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (since, limit))
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            put_connection(conn)
+
     def facts_without_embedding(self, limit: int = 100) -> list[dict[str, Any]]:
         sql = """
             SELECT fact_id, content

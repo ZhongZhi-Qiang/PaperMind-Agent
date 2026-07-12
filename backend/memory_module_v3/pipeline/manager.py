@@ -184,10 +184,24 @@ class PipelineManager:
                 logger.error("L2 pipeline failed: %s", exc)
 
     async def _run_l2(self, session_id: str, state: PipelineSessionState) -> None:
-        """L2 consolidation: organize L1 facts into scene blocks."""
+        """L2 consolidation: merge new L1 facts into existing scene blocks.
+
+        Incremental by default: only new facts since last L2 run are sent to LLM
+        together with existing scene summaries. Falls back to full rebuild on first run.
+        """
         from ..consolidate.scene_extractor import SceneExtractor
         extractor = SceneExtractor(self._l1, self._l2, self._llm_fn)
-        await extractor.consolidate()
+
+        # Query new facts since last L2 run
+        if state.last_l2_at:
+            new_facts = self._l1.get_since(state.last_l2_at)
+        else:
+            new_facts = []
+
+        if new_facts:
+            await extractor.consolidate_incremental(new_facts)
+        else:
+            logger.debug("No new facts since last L2, skipping consolidation")
 
         state.last_l2_at = datetime.now(timezone.utc)
         state.pending_l2 = False

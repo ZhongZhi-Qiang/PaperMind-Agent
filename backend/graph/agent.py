@@ -7,13 +7,10 @@ from typing import Any
 
 import logging
 
-from config import get_settings, runtime_config
-from graph.route_classifier import classify_query, RouteTier, L1_READONLY_TOOLS
+from config import get_settings
 from graph.context import RequestContext
 from graph.agent_factory import build_agent_config, create_agent_from_config
 from service.session_manager import SessionManager
-from graph.llm import build_llm_config_from_settings, get_llm
-from graph.checkpointer import get_checkpointer
 from tools import get_all_tools
 from memory_module_v3.config import get_memory_backend
 
@@ -65,62 +62,6 @@ class AgentManager:
         )
         return create_agent_from_config(config)
 
-    def _build_l1_agent(self):
-        """Build lightweight agent for L1 knowledge QA queries.
-
-        Uses fast LLM + read-only tools + Guardian middleware only.
-        No HarnessSecurity, HarnessReview, Offload, or Summarization.
-        """
-        from graph.agent_factory import AgentConfig, create_agent_from_config
-        from graph.llm import get_fast_llm
-        from service.prompt_builder import build_system_prompt
-
-        l1_tools = [t for t in self.tools if t.name in L1_READONLY_TOOLS]
-        fast_llm = get_fast_llm(get_settings(), temperature=0.0, streaming=True)
-        system_prompt = build_system_prompt(self.base_dir) if self.base_dir else ""
-        checkpointer = get_checkpointer()
-
-        config = AgentConfig(
-            llm=fast_llm,
-            tools=l1_tools,
-            system_prompt=system_prompt,
-            checkpointer=checkpointer,
-            guardian_enabled=True,
-            use_summarization=False,
-            harness_security_enabled=False,
-            harness_review_enabled=False,
-            offload_enabled=False,
-        )
-        return create_agent_from_config(config)
-
-    async def _stream_l0_response(
-        self,
-        messages: list[dict[str, str]],
-        context: RequestContext | None,
-    ):
-        """Stream L0 trivial query response — fast LLM direct reply, no tools/middleware."""
-        import time as _time
-        from graph.llm import get_fast_llm
-
-        _t0_l0 = _time.perf_counter()
-        fast_llm = get_fast_llm(get_settings(), temperature=0.0, streaming=True)
-
-        full_content: list[str] = []
-        async for chunk in fast_llm.astream(messages):
-            text = _stringify_content(getattr(chunk, "content", ""))
-            if text:
-                full_content.append(text)
-                yield {"type": "token", "content": text}
-
-        final = "".join(full_content)
-        _t_done = _time.perf_counter()
-        session_id = context.thread_id if context else "default"
-        logger.info(
-            "latency session=%s L0_direct_ms=%.0f chars=%d",
-            session_id, (_t_done - _t0_l0) * 1000, len(final),
-        )
-        yield {"type": "done", "content": final}
-
     def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
         for item in history:
@@ -144,25 +85,12 @@ class AgentManager:
         _t1: float | None = None     # recall done
         _t2: float | None = None     # first assistant token
 
-        # ── Smart routing: classify query before any heavy work ──
         settings = get_settings()
-        route_tier = RouteTier.L2  # default: full pipeline
-        if settings.smart_routing_enabled:
-            route_tier = classify_query(message)
-            logger.debug("Smart routing: tier=%s query=%.60s", route_tier.value, message)
-
         memory_backend = get_memory_backend()
         turn_messages: list[dict[str, str]] = []
         session_id = context.thread_id if context else "default"
 
-        # L0: trivial query → fast LLM direct reply, no recall, no tools, no middleware
-        if route_tier == RouteTier.L0:
-            turn_messages.append({"role": "user", "content": message})
-            async for event in self._stream_l0_response(turn_messages, context):
-                yield event
-            return
-
-        # --- v3 auto-recall (skip for L0 only) ---
+        # --- v3 auto-recall ---
         if memory_backend == "v3":
             await _init_v3_once()
             # Register v3 tools if not already present (init may have completed after initialize())
@@ -195,17 +123,13 @@ class AgentManager:
                     logger.warning("Memory v3 auto-recall failed: %s", v3_exc)
             _t1 = _time.perf_counter()
             logger.info(
-                "latency session=%s recall_ms=%.0f tier=%s",
-                session_id, (_t1 - _t0) * 1000, route_tier.value,
+                "latency session=%s recall_ms=%.0f",
+                session_id, (_t1 - _t0) * 1000,
             )
 
         turn_messages.append({"role": "user", "content": message})
 
-        # ── Route-based agent selection ──
-        if route_tier == RouteTier.L1:
-            agent = self._build_l1_agent()
-        else:
-            agent = self._build_agent()
+        agent = self._build_agent()
         run_config: dict[str, Any] = {"configurable": {"thread_id": (context.thread_id if context else "")}}
         if context and context.callbacks:
             run_config["callbacks"] = context.callbacks
@@ -281,9 +205,10 @@ class AgentManager:
 
                     if message_type == "tool":
                         tool_call_id = str(getattr(agent_message, "tool_call_id", ""))
+                        tool_name = getattr(agent_message, "name", "tool")
                         pending = pending_tools.pop(
                             tool_call_id,
-                            {"tool": getattr(agent_message, "name", "tool"), "input": ""},
+                            {"tool": tool_name, "input": ""},
                         )
                         output = _stringify_content(getattr(agent_message, "content", ""))
 

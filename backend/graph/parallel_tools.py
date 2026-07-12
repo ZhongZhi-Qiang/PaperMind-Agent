@@ -168,9 +168,10 @@ class ParallelToolNode(ToolNode):
 
 
 def patch_agent_for_parallel_tools(agent_graph: Any, tools: list[BaseTool]) -> Any:
-    """Replace the tools node with ParallelToolNode.
+    """Replace the ToolNode inside the tools PregelNode with ParallelToolNode.
 
-    Returns the modified agent_graph, or the original if patching fails.
+    Patches the inner ToolNode step of the RunnableSeq that wraps channel read/write,
+    preserving the channel handling that LangGraph's runner expects.
     """
     try:
         from config import get_settings
@@ -190,11 +191,32 @@ def patch_agent_for_parallel_tools(agent_graph: Any, tools: list[BaseTool]) -> A
         security_enabled = getattr(get_settings(), "harness_security_enabled", True)
         parallel_node = ParallelToolNode(tools, security_enabled=security_enabled)
 
-        # nodes["tools"] is a PregelNode wrapper with .node (the runnable) and .bound
         pregel_node = nodes["tools"]
-        pregel_node.bound = parallel_node
-        pregel_node.node = parallel_node  # parallel_node IS a RunnableCallable (via ToolNode)
-        logger.info("ParallelToolNode installed (security=%s)", security_enabled)
+        # pregel_node.node is a RunnableSeq wrapping: channel_read → ToolNode → channel_write
+        runnable_seq = pregel_node.node
+
+        # Try to replace the inner ToolNode step in the RunnableSeq
+        if hasattr(runnable_seq, "steps"):
+            new_steps = []
+            replaced = False
+            for step in runnable_seq.steps:
+                if isinstance(step, ToolNode):
+                    new_steps.append(parallel_node)
+                    replaced = True
+                else:
+                    new_steps.append(step)
+            if replaced:
+                runnable_seq.steps = new_steps
+                logger.info("ParallelToolNode installed via RunnableSeq step replacement")
+            else:
+                logger.warning("Could not find ToolNode step in RunnableSeq; falling back to PregelNode patch")
+                pregel_node.bound = parallel_node
+                pregel_node.node = parallel_node
+        else:
+            # Fallback: PregelNode direct replacement (may break channel wrapping)
+            logger.warning("RunnableSeq has no steps attribute; using PregelNode replacement")
+            pregel_node.bound = parallel_node
+            pregel_node.node = parallel_node
 
         return agent_graph
     except Exception as exc:
