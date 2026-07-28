@@ -165,7 +165,7 @@ class ContextOffloadMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, 
         changes = 0
 
         # Phase 1: L3 compression (summary replacement)
-        if context_ratio >= 0.3:
+        if context_ratio >= 0.5:
             new_messages, compressed = self._offload.compress_messages_by_score(
                 new_messages, context_ratio
             )

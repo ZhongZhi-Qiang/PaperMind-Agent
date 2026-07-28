@@ -90,9 +90,7 @@ DEFAULTS = {
     "l2_null_threshold": 4,
     "l2_timeout_seconds": 300,
     "mild_offload_ratio": 0.5,
-    "aggressive_compress_ratio": 0.85,
-    "emergency_compress_ratio": 0.95,
-    "emergency_target_ratio": 0.6,
+    "max_pressure_ratio": 0.90,
     "max_pairs_per_batch": 20,
     "mmd_max_chars": 4000,
 }

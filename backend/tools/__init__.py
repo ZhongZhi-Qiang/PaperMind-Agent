@@ -23,6 +23,7 @@ from tools.wiki_engine_tool import (
     AppendLogTool,
     LintWikiTool,
     QueryWikiTool,
+    ListSourceFilesTool,
 )
 
 
@@ -38,6 +39,7 @@ def get_all_tools(base_dir: Path) -> list[BaseTool]:
         SaveWikiPageTool(root_dir=base_dir),
         ReadWikiPageTool(root_dir=base_dir),
         ListWikiPagesTool(root_dir=base_dir),
+        ListSourceFilesTool(root_dir=base_dir),
         RebuildIndexTool(root_dir=base_dir),
         AppendLogTool(root_dir=base_dir),
         LintWikiTool(root_dir=base_dir),

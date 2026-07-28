@@ -36,9 +36,6 @@ from .graph_builder import generate_ref_id
 
 logger = logging.getLogger(__name__)
 
-# Minimum score for L3 mild compression replacement
-_MILD_MIN_SCORE = 5
-
 
 def _extract_json(text: str) -> str:
     """Extract JSON from LLM response (strip markdown fences, etc.)."""
@@ -586,10 +583,18 @@ class OffloadPipeline:
         messages: list[Any],
         context_ratio: float,
     ) -> tuple[list[Any], int]:
-        """L3: Compress messages using L1 scores.
+        """L3: 2D-progressive compression — never deletes or truncates.
 
-        Mild compression: replace tool results with L1 summaries (high score first).
-        Aggressive compression: delete oldest messages.
+        Both score (replaceability) and length (token savings) slide with
+        pressure. A long result with a moderate score saves more tokens
+        than a short result with a perfect score — both matter.
+
+        At 50%:  score ≥ 8, length > 300  (conservative: only sure wins)
+        At 70%:  score ≥ 5, length > 175
+        At 90%:  score ≥ 2, length > 50   (aggressive: grab any win)
+
+        Messages are processed in priority order: score * log10(length)
+        desc — biggest wins first. No message is ever deleted.
 
         Args:
             messages: Current message list
@@ -598,57 +603,67 @@ class OffloadPipeline:
         Returns:
             (modified_messages, compressed_count)
         """
-        mild_ratio = self._config.get("mild_offload_ratio", 0.5)
-        aggressive_ratio = self._config.get("aggressive_compress_ratio", 0.85)
-        emergency_ratio = self._config.get("emergency_compress_ratio", 0.95)
+        import math as _math
 
-        if context_ratio < mild_ratio:
+        mild_start = self._config.get("mild_offload_ratio", 0.5)
+        max_ratio = self._config.get("max_pressure_ratio", 0.90)
+
+        if context_ratio < mild_start:
             return messages, 0
 
         entries = self._storage.read_entries()
         score_map = {e.tool_call_id: e for e in entries if e.score is not None}
 
+        # ── 2D progressive thresholds ─────────────────────────────────
+        # Both axes slide linearly with pressure.
+        t = min(1.0, max(0.0, (context_ratio - mild_start) / (max_ratio - mild_start)))
+        min_score = max(2, int(8 - t * 6))       # t=0→8, t=1→2
+        min_length = max(50, int(300 - t * 250))  # t=0→300, t=1→50
+
         compressed = 0
         new_messages = list(messages)
 
-        if context_ratio >= emergency_ratio:
-            # Emergency: truncate to oldest 60%
-            target = int(len(messages) * 0.6)
-            removed = len(messages) - target
-            new_messages = messages[-target:]
-            compressed += removed
-            logger.warning("L3 emergency: removed %d oldest messages", removed)
+        from langchain_core.messages import ToolMessage
 
-        elif context_ratio >= aggressive_ratio:
-            # Aggressive: remove oldest 30% of messages
-            remove_count = max(1, int(len(messages) * 0.3))
-            new_messages = messages[remove_count:]
-            compressed += remove_count
-            logger.info("L3 aggressive: removed %d oldest messages", remove_count)
+        # ── Build candidate list with combined priority ───────────────
+        # Priority = score * log10(length) — rewards both replaceability
+        # and token savings in one score.
+        candidates: list[tuple[float, Any, int]] = []  # (priority, entry, msg_idx)
+        for entry in score_map.values():
+            if entry.score is None or entry.score < min_score:
+                continue
+            for i, msg in enumerate(new_messages):
+                if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") == entry.tool_call_id:
+                    content = _stringify_content(msg.content)
+                    L = len(content)
+                    if L > min_length and "[Offloaded Tool Result" not in content:
+                        priority = entry.score * _math.log10(max(L, 1))
+                        candidates.append((priority, entry, i))
+                    break
 
-        else:
-            # Mild: replace tool results with summaries (by score descending)
-            from langchain_core.messages import ToolMessage
+        # Sort by priority descending — biggest wins first
+        candidates.sort(key=lambda c: c[0], reverse=True)
 
-            scored_items = sorted(score_map.values(), key=lambda e: e.score or 0, reverse=True)
-            for entry in scored_items:
-                if entry.score is not None and entry.score >= _MILD_MIN_SCORE:
-                    for i, msg in enumerate(new_messages):
-                        if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", "") == entry.tool_call_id:
-                            content = _stringify_content(msg.content)
-                            if len(content) > 300:  # Only compress long results
-                                new_messages[i] = ToolMessage(
-                                    content=(
-                                        f"[Offloaded Tool Result | node: {entry.node_id or 'N/A'}]\n"
-                                        f"Summary: {entry.summary}\n"
-                                        f"result_ref: {entry.result_ref} (read this file for full tool call and raw result)"
-                                    ),
-                                    tool_call_id=msg.tool_call_id,
-                                    name=getattr(msg, "name", ""),
-                                    id=getattr(msg, "id", None),
-                                )
-                                compressed += 1
-                                break
+        for _priority, entry, idx in candidates:
+            content = _stringify_content(new_messages[idx].content)
+            new_messages[idx] = ToolMessage(
+                content=(
+                    f"[Offloaded Tool Result | node: {entry.node_id or 'N/A'}]\n"
+                    f"Summary: {entry.summary}\n"
+                    f"result_ref: {entry.result_ref} (read this file for full tool call and raw result)"
+                ),
+                tool_call_id=getattr(new_messages[idx], "tool_call_id", ""),
+                name=getattr(new_messages[idx], "name", ""),
+                id=getattr(new_messages[idx], "id", None),
+            )
+            compressed += 1
+
+        if compressed > 0:
+            logger.info(
+                "L3: compressed %d tool results (ratio=%.2f, t=%.2f, "
+                "min_score=%d, min_length=%d)",
+                compressed, context_ratio, t, min_score, min_length,
+            )
 
         return new_messages, compressed
 

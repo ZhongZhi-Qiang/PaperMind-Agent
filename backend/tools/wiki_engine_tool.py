@@ -87,15 +87,17 @@ def _build_related_pages_section(related_pages: list[str]) -> str:
 
 
 def _sanitize_slug(slug: str) -> str:
-    """Sanitize a slug to be URL-friendly."""
+    """Sanitize a slug to be URL-friendly (ASCII alphanumeric + hyphens only)."""
+    import re
     slug = slug.lower().strip().replace(" ", "-")
-    slug = "".join(c for c in slug if c.isalnum() or c == "-")[:100]
+    slug = re.sub(r"[^a-z0-9-]", "", slug)[:100]
     return slug.strip("-")
 
 
 def _parse_frontmatter(text: str) -> dict:
     """Parse YAML frontmatter from markdown text."""
     import re
+    text = text.lstrip('﻿')  # strip UTF-8 BOM if present
     match = re.match(r"^---\n(.*?)\n---\n?", text, re.DOTALL)
     if not match:
         return {}
@@ -142,6 +144,39 @@ def _build_frontmatter(fields: dict) -> str:
 # ---------------------------------------------------------------------------
 # Register Source Tool
 # ---------------------------------------------------------------------------
+
+def _extract_pdf_title(file_path: str) -> str:
+    """Try to extract the paper title from a PDF's first page using PyMuPDF.
+
+    Returns the detected title string, or empty string on failure.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return ""
+    try:
+        doc = fitz.open(file_path)
+        if len(doc) == 0:
+            doc.close()
+            return ""
+        first_page = doc[0].get_text()
+        doc.close()
+        for line in first_page.split("\n")[:20]:
+            line = line.strip()
+            if not line or len(line) < 3:
+                continue
+            lower = line.lower()
+            if any(
+                kw in lower
+                for kw in ["arxiv", "preprint", "conference", "journal",
+                           "proceedings", "abstract", "csubmitted"]
+            ):
+                continue
+            if len(line) < 200:
+                return line
+    except Exception:
+        pass
+    return ""
 
 class RegisterSourceInput(BaseModel):
     file_path: str = Field(
@@ -223,10 +258,17 @@ class RegisterSourceTool(BaseTool):
             shutil.copy2(str(p), str(dest))
 
         # create manifest entry
-        slug = _sanitize_slug(title) if title else _sanitize_slug(p.stem)
+        # For PDFs, auto-extract the title from the file to prevent
+        # prompt text / non-academic strings from being used as titles.
+        effective_title = title
+        if p.suffix.lower() == ".pdf":
+            extracted = _extract_pdf_title(str(p))
+            if extracted:
+                effective_title = extracted
+        slug = _sanitize_slug(effective_title) if effective_title else _sanitize_slug(p.stem)
         entry = {
             "slug": slug,
-            "title": title or p.stem,
+            "title": effective_title or p.stem,
             "authors": [a.strip() for a in authors.split(",") if a.strip()] if authors else [],
             "year": year,
             "venue": venue,
@@ -247,6 +289,98 @@ class RegisterSourceTool(BaseTool):
 
     async def _arun(self, file_path: str, title: str = "", authors: str = "", year: int = 0, venue: str = "", arxiv_id: str = "", doi: str = "", run_manager: AsyncCallbackManagerForToolRun | None = None) -> str:
         return await asyncio.to_thread(self._run, file_path, title, authors, year, venue, arxiv_id, doi, None)
+
+
+# ---------------------------------------------------------------------------
+# List Source Files Tool
+# ---------------------------------------------------------------------------
+
+class ListSourceFilesInput(BaseModel):
+    show: str = Field(
+        default="all",
+        description="Which files to show: 'all' (default), 'unregistered' (only files not in manifest), or 'registered'.",
+    )
+
+
+class ListSourceFilesTool(BaseTool):
+    """List files in raw/sources/ with registration status, sorted by modification time (newest first)."""
+
+    name: str = "list_source_files"
+    description: str = (
+        "List files in raw/sources/ with registration status. "
+        "Sorted by modification time (newest first) so you can find recently uploaded PDFs. "
+        "Use show='unregistered' to see only files that haven't been registered yet."
+    )
+    args_schema: Type[BaseModel] = ListSourceFilesInput
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    _root_dir: Path = PrivateAttr()
+
+    def __init__(self, root_dir: Path, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._root_dir = root_dir.resolve()
+
+    def _run(
+        self,
+        show: str = "all",
+        run_manager: CallbackManagerForToolRun | None = None,
+    ) -> str:
+        sources_dir = self._root_dir / "raw" / "sources"
+        if not sources_dir.exists():
+            return json.dumps({"error": "raw/sources/ directory does not exist"}, ensure_ascii=False)
+
+        # Load registered hashes and stored_paths from manifest
+        registered: dict[str, dict] = {}  # stored_path basename -> manifest entry
+        manifest_path = sources_dir / "manifest.jsonl"
+        if manifest_path.exists():
+            for line in manifest_path.read_text(encoding="utf-8").strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    stored = entry.get("stored_path", "")
+                    basename = Path(stored).name if stored else ""
+                    if basename:
+                        registered[basename] = entry
+                except json.JSONDecodeError:
+                    continue
+
+        # Collect all files
+        files: list[dict] = []
+        for f in sorted(sources_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if not f.is_file():
+                continue
+            # Skip manifest and other metadata files
+            if f.name == "manifest.jsonl":
+                continue
+            is_registered = f.name in registered
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+            status = "registered" if is_registered else "unregistered"
+            if show == "unregistered" and is_registered:
+                continue
+            if show == "registered" and not is_registered:
+                continue
+
+            info = {
+                "name": f.name,
+                "size_bytes": f.stat().st_size,
+                "modified": mtime,
+                "status": status,
+            }
+            if is_registered:
+                info["slug"] = registered[f.name].get("slug", "")
+                info["title"] = registered[f.name].get("title", "")
+            files.append(info)
+
+        return json.dumps({
+            "directory": str(sources_dir),
+            "total_files": len(files),
+            "filter": show,
+            "files": files,
+        }, ensure_ascii=False, indent=2)
+
+    async def _arun(self, show: str = "all", run_manager: AsyncCallbackManagerForToolRun | None = None) -> str:
+        return await asyncio.to_thread(self._run, show, None)
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +463,29 @@ class SaveWikiPageTool(BaseTool):
         # check if page already exists (for update detection)
         page_path = wiki_dir / f"{slug}.md"
         is_update = page_path.exists()
+
+        # Dedup by source_hash for paper type: if another paper page already
+        # has the same source_hash, refuse to create a duplicate. This prevents
+        # the agent from creating garbage pages when the ingest pipeline has
+        # already created the correct paper page.
+        if source_hash and entity_type == "paper" and not is_update:
+            papers_dir = self._root_dir / "wiki" / "papers"
+            if papers_dir.exists():
+                for existing in papers_dir.glob("*.md"):
+                    if existing.name == f"{slug}.md":
+                        continue
+                    meta = _parse_frontmatter(existing.read_text(encoding="utf-8"))
+                    if meta.get("source_hash") == source_hash:
+                        rel = existing.relative_to(self._root_dir)
+                        return json.dumps({
+                            "status": "duplicate",
+                            "message": (
+                                f"A paper page with this source_hash already exists: "
+                                f"{meta.get('slug', existing.stem)}. Use read_wiki_page to view it."
+                            ),
+                            "existing_path": str(rel).replace("\\", "/"),
+                            "existing_slug": meta.get("slug", existing.stem),
+                        }, ensure_ascii=False)
 
         # build frontmatter
         now = _today_str()
@@ -927,6 +1084,7 @@ class LintWikiTool(BaseTool):
                         "severity": "red",
                         "type": "missing_frontmatter",
                         "page": slug,
+                        "path": all_pages[slug]["path"],
                         "message": f"Page {slug} has no YAML frontmatter",
                     })
 
@@ -938,6 +1096,7 @@ class LintWikiTool(BaseTool):
                             "severity": "red",
                             "type": "missing_field",
                             "page": slug,
+                            "path": all_pages[slug]["path"],
                             "message": f"Page {slug} missing required field: {field}",
                         })
 
@@ -948,6 +1107,7 @@ class LintWikiTool(BaseTool):
                         "severity": "yellow",
                         "type": "invalid_status",
                         "page": slug,
+                        "path": all_pages[slug]["path"],
                         "message": f"Page {slug} has invalid status: {status}",
                     })
 
@@ -958,6 +1118,7 @@ class LintWikiTool(BaseTool):
                         "severity": "yellow",
                         "type": "invalid_confidence",
                         "page": slug,
+                        "path": all_pages[slug]["path"],
                         "message": f"Page {slug} has invalid confidence: {conf}",
                     })
 
@@ -971,6 +1132,7 @@ class LintWikiTool(BaseTool):
                         "severity": "yellow",
                         "type": "dangling_reference",
                         "page": slug,
+                        "path": all_pages[slug]["path"],
                         "message": f"Page {slug} references non-existent page: {ref}",
                     })
 
@@ -987,6 +1149,7 @@ class LintWikiTool(BaseTool):
                     "severity": "blue",
                     "type": "orphan_page",
                     "page": slug,
+                    "path": all_pages[slug]["path"],
                     "message": f"Page {slug} is not referenced by any other page",
                 })
 
@@ -1000,6 +1163,7 @@ class LintWikiTool(BaseTool):
                         "severity": "yellow",
                         "type": "index_mismatch",
                         "page": slug,
+                        "path": all_pages[slug]["path"],
                         "message": f"Page {slug} exists but not in index.md",
                     })
 

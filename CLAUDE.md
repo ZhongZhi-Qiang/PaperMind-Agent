@@ -4,247 +4,170 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mini-OpenClaw is a local, file-first, auditable AI Agent workbench built on LangChain 1.x `create_agent`. It features structured long-term memory with hybrid retrieval, a prompt-injection defense layer (Guardian), a skill-based capability system, and Langfuse observability integration.
+PaperMind-Agent (originally "Mini-OpenClaw") is a local, file-first, auditable AI Agent workbench built on LangChain 1.x `create_agent`. It features structured long-term memory with hybrid retrieval, a prompt-injection defense layer (Guardian), a skill-based capability system, a daily arXiv digest + on-demand PDF ingest pipeline, and Langfuse observability integration.
 
 ## Architecture
 
 ### Backend (FastAPI + LangChain Agent)
 
-**Entry point:** `backend/app.py` — FastAPI app with lifespan that initializes checkpointer, agent manager, memory indexer, and scheduler.
+**Entry point:** `backend/app.py` — FastAPI lifespan initializes checkpointer, `AgentManager`, memory indexer, and arXiv scheduler. Routers: `/api/chat`, `/api/sessions`, `/api/files`, `/api/ingest`, `/api/tokens`, `/api/compress`, `/api/config`, `/api/digest`.
 
-**Request flow:** Frontend → `POST /api/chat` (SSE streaming) → `AgentManager.astream()` → LangChain agent graph (Guardian → Harness security → context offload → summarization → tool calls → Harness review) → streamed response.
+**Request flow:** Frontend → `POST /api/chat` (SSE) → `AgentManager.astream()` → LangChain agent graph (Guardian → Harness security → context offload → summarization → parallel tool calls → Harness review) → streamed response.
 
 **Key layers:**
 
-- `graph/agent.py` — `AgentManager` singleton orchestrates agent creation, streaming, title generation, and history summarization. It selects memory backend (v1/v2/v3) and builds injection context before each turn.
-- `graph/agent_factory.py` — `build_agent_config()` + `create_agent_from_config()`. Assembles the agent with middleware chain: Guardian → HarnessSecurity → ContextOffload → Summarization → HarnessReview (order matters).
-- `graph/guardian.py` — `GuardianMiddleware` implements `before_agent` hook. Calls a lightweight LLM to classify user messages as "安全"/"危险". On "危险", jumps to end node with block message. Supports `fail-open` and `fail-closed` modes.
-- `graph/harness_security.py` — `HarnessSecurityMiddleware` implements `wrap_tool_call` hook. Intercepts tool execution to block sensitive file access (glob patterns), dangerous commands (regex), and custom rules from `config/harness_rules.yaml` (hot-reloadable).
-- `graph/harness_review.py` — `HarnessReviewMiddleware` implements `after_agent` hook. Runs LLM-based quality review after each conversation turn: answer quality scoring, hallucination detection, tool call audit.
-- `graph/llm.py` — LLM/Embedding factory using OpenAI-compatible APIs. Supports providers: zhipu, bailian, deepseek, openai.
-- `graph/checkpointer.py` — Postgres-backed LangGraph checkpointer for multi-turn state persistence.
+- `graph/agent.py` — `AgentManager` singleton: agent creation, `astream()`, title generation, history summarization, v3 memory auto-recall + injection context per turn.
+- `graph/agent_factory.py` — `build_agent_config()` + `create_agent_from_config()`. Middleware chain (order matters): Guardian → HarnessSecurity → ContextOffload → Summarization → HarnessReview. Patches the tools node for parallel execution *after* `create_agent()`.
+- `graph/guardian.py` — `GuardianMiddleware` (`before_agent`): lightweight LLM classifies messages 安全/危险; on 危险 jumps to end node. `fail-open` / `fail-closed` modes.
+- `graph/harness_security.py` — `HarnessSecurityMiddleware` (`wrap_tool_call`): blocks sensitive file access (glob), dangerous commands (regex), custom rules from `config/harness_rules.yaml` (hot-reloadable via mtime).
+- `graph/harness_review.py` — `HarnessReviewMiddleware` (`after_agent`): LLM review per turn — quality scoring, hallucination detection, tool-call audit.
+- `graph/llm.py` — LLM/embedding factory (OpenAI-compatible). `get_llm()` for main, `get_fast_llm()` for Guardian/titles/summarization/offload/L1 extraction (degrades to main when unset). Providers: zhipu, bailian, deepseek, openai.
+- `graph/checkpointer.py` — Postgres-backed LangGraph checkpointer for multi-turn state.
 
-**Memory system** (`MEMORY_BACKEND` env var: `off` | `v3`):
+**Memory** (`MEMORY_BACKEND`: `off` | `v3`): `memory_module_v3/` is a four-layer pyramid (L0→L1→L2→L3), auto-capture + auto-recall. Hybrid storage — L0 (raw messages) JSON at `l0/{session_id}.json`; L2 (scenes) `.md` at `scenes/`; L3 (persona) `persona.md`; L1 (facts) + pipeline state in PostgreSQL/pgvector. L0 has no embedding (buffer for L1 extraction only). `offload/` is the Symbolic Short-Term Memory pipeline (L1 summary → L1.5 task judgment → L2 Mermaid → L3 progressive compression); in `before_model` it both replaces old `ToolMessage.content` with a plain-text summary+`result_ref`, and injects the active `.mmd` as a `<current_task_context>` HumanMessage after the last user message.
 
-- `memory_module_v3/` — Four-layer memory pyramid (L0→L1→L2→L3) with auto-capture and auto-recall. **Hybrid storage**: L0 (raw messages) stored as local JSON files at `memory_module_v3/l0/{session_id}.json`; L2 (scenes) as `.md` files at `memory_module_v3/scenes/`; L3 (persona) as `memory_module_v3/persona.md`; L1 (facts) + pipeline state in PostgreSQL with pgvector. L0 has no embedding — it is a temporary buffer for L1 extraction only.
-- Includes `offload/` — Symbolic Short-Term Memory pipeline (L1 summary → L1.5 task judgment → L2 Mermaid generation → L3 progressive compression). Two independent operations in `before_model`: **summary replacement** — replace old `ToolMessage.content` with plain text `[Offloaded Tool Result | node: N2]\nSummary: ...\nresult_ref: refs/xxx.md`; **MMD injection** — insert active `.mmd` Mermaid diagram as a `HumanMessage` wrapped in `<current_task_context>` tags, positioned after the last user message.
+**Injection modes** (v3): `always` (force-inject every turn, default) | `tool` (agent calls `search_memory_v3` autonomously) | `off`.
 
-**Injection modes** (v3): `tool` (agent calls `search_memory_v3` autonomously), `always` (force-inject every turn, default), `off`.
+### Tools
 
-**Tools:** Registered in `tools/__init__.py`. Core tools: terminal, python_repl, fetch_url, read_file, PDF parser, wiki engine (8 tools in `wiki_engine_tool.py`: RegisterSource, SaveWikiPage, ReadWikiPage, ListWikiPages, RebuildIndex, AppendLog, LintWiki, QueryWiki). Memory tools added conditionally based on backend config.
+`tools/__init__.py`. Core: terminal, python_repl, fetch_url, read_file, PDF parser, wiki engine (8 tools in `wiki_engine_tool.py`: RegisterSource, SaveWikiPage, ReadWikiPage, ListWikiPages, RebuildIndex, AppendLog, LintWiki, QueryWiki). Memory tools added conditionally on backend config.
 
-**arXiv digest system** (daily paper ingestion):
-- `service/scheduler.py` — APScheduler cron job, runs at `ARXIV_DIGEST_HOUR` (default 8:00 Asia/Shanghai)
-- `service/arxiv_service.py` — Fetches from 5 RSS feeds (cs.AI/CL/MA/IR/RO), two-stage filter (14 broad keywords → semantic ranking against 5 interest topics)
-- `service/digest_pipeline.py` — Per-paper pipeline: download PDF → parse → LLM analysis (7 sections) → entity extraction (concepts/methods/datasets) → create wiki pages (5 types) → tag classification (16 tags from `wiki/tags.yaml`) → auto-create surveys (tag with ≥3 papers)
-- `service/wechat_notifier.py` — Push daily digest via Enterprise WeChat webhook
-- `api/digest.py` — Endpoints: `GET /status`, `GET /test` (dry run), `POST /run` (manual trigger)
-- Post-digest lint runs `LintWikiTool(auto_fix=True, backfill=True)` to fix structure and backfill missing entities
-- Config: `ARXIV_DIGEST_HOUR`, `ARXIV_DIGEST_ENABLED`, `WECHAT_WEBHOOK_KEY`
+### Latency optimization layer
 
-**Wiki knowledge management** (file-first, 3-layer architecture):
-- Layer 1: `raw/sources/` — Original files (PDF/MD), SHA-256 dedup via `manifest.jsonl`
-- Layer 2: `wiki/` — 8 entity types (paper/concept/method/dataset/author/survey/comparison/idea), each entity = 1 markdown file with YAML frontmatter + `[[wikilink]]` cross-references
-- Layer 3: `wiki/templates/` (7 tpl-*.md), `wiki/tags.yaml` (16 research domains), lint rules
-- `service/wiki_retriever.py` — Hybrid retrieval (BM25 jieba + embedding cosine, RRF fusion k=60)
-- Knowledge entropy management: 6 entropy sources (duplication, dangling refs, orphans, staleness, fragmentation, context pollution) with automated lint + backfill governance
-- Obsidian-compatible: `.obsidian/` config, graph view with entity type color coding
+- **Parallel tool execution** (`graph/parallel_tools.py`) — `patch_agent_for_parallel_tools()` runs multiple `tool_calls` via `asyncio.gather` (sum→max), each still routed through `HarnessSecurity` first. Non-destructive: falls back if graph shape differs.
+- **Smart routing** (`graph/route_classifier.py`) — `classify_query()` → `RouteTier` L0/L1/L2 (chitchat / knowledge-QA / complex). **Defined, tested, benchmarked, but NOT wired into `astream`** — designed-but-pending per `docs/latency_optimization_summary.md`. Intended mapping if wired: L0 fast-LLM direct (skip all); L1 fast-LLM + recall + read-only tools + Guardian; L2 full pipeline.
+- **Embedding + recall cache** (`memory_module_v3/retrieval/service.py`) — L2/L3 stable context cached with a dirty flag (`PipelineManager` invalidates after L2/L3 runs); embeddings via quantized-key Redis (`_emb_cache_get`). Auto-recall splits stable context (inject only on change) from L1 dynamic context (inject every turn).
+- **Latency instrumentation** — `astream()` logs `recall_ms` / `first_token_ms` / `ttft_ms` from `_t0/_t1/_t2`. Read these when diagnosing slow turns.
 
-**System prompt assembly:** `service/prompt_builder.py` concatenates: `workspace/SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, skills snapshot, and (optionally) memory retrieval context. Changes to workspace files take effect on next request without code changes.
+### arXiv digest + PDF ingest (share digest internals)
 
-**Skills:** `skills/*/SKILL.md` — agent reads snapshot first, then drills into specific skill files on demand.
+- **arXiv digest** (daily): `service/scheduler.py` (APScheduler at `ARXIV_DIGEST_HOUR`), `service/arxiv_service.py` (5 RSS feeds cs.AI/CL/MA/IR/RO → 14-keyword broad filter → semantic ranking against 5 interest topics), `service/digest_pipeline.py` (per-paper: download → parse → LLM analysis (7 sections) → entity extraction → create wiki pages (5 types) → 16-tag classification from `wiki/tags.yaml` → auto-surveys for tags with ≥3 papers), `service/wechat_notifier.py` (Enterprise WeChat push), `api/digest.py` (`GET /status`, `GET /test` dry-run, `POST /run`). Post-digest lint runs `LintWikiTool(auto_fix=True, backfill=True)`. Exposes reusable `_analyze_with_llm` / `_extract_entities_with_llm` / `_create_wiki_pages`.
+- **PDF ingest** (on-demand upload): `api/ingest.py` `POST /api/ingest/pdf` (multipart, or `url`/`title`, 50 MB cap, SSE stream). `service/ingest_service.py` `process_pdf_upload()` runs the digest stages on one user PDF. Parser fallback: MinerU first (only when `pdf_url` *and* `MINERU_TOKEN` given; `tools/mineru_client.py`), else PyMuPDF (`tools/pdf_parser_tool._parse_pdf`); chosen `source` is reported in progress. SSE stages: `parsing` → `parsing_done` → `analysis` → `entities` → `wiki_pages` → `index` → `done` (`paper_slug`, `entity_slugs`, `wiki_path`). Temp files cleaned in the generator's `finally`.
+
+### Wiki knowledge management (file-first, 3 layers)
+
+Layer 1 `raw/sources/` — original PDF/MD, SHA-256 dedup via `manifest.jsonl`. Layer 2 `wiki/` — 8 entity types (paper/concept/method/dataset/author/survey/comparison/idea), each entity = 1 markdown file (YAML frontmatter + `[[wikilink]]` cross-refs). Layer 3 `wiki/templates/` (7 `tpl-*.md`), `wiki/tags.yaml` (16 domains), lint rules. `service/wiki_retriever.py` — hybrid retrieval (BM25 jieba + embedding cosine, RRF k=60). Knowledge-entropy governance: 6 sources (duplication, dangling refs, orphans, staleness, fragmentation, context pollution) with automated lint + backfill. Obsidian-compatible (`.obsidian/`, graph view).
+
+**System prompt assembly:** `service/prompt_builder.py` concatenates `workspace/SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, skills snapshot, optional memory context — changes take effect next request, no code change.
+
+**Skills:** `skills/*/SKILL.md` — agent reads the snapshot first, drills into specific files on demand.
 
 ### Frontend (Next.js 14 + React 18 + TypeScript)
 
-- `src/app/page.tsx` — Main workspace: three-panel layout (sidebar, chat, resizable)
-- `src/components/chat/` — ChatPanel, ChatMessage, ChatInput, ThoughtChain (tool call visualization), RetrievalCard
-- `src/components/editor/` — InspectorPanel (Monaco editor for files/memory/skills/workspace)
-- `src/components/layout/` — Navbar, Sidebar, ResizeHandle
-- `src/lib/store.ts` — App state management
+`src/app/page.tsx` — three-panel workspace (sidebar/chat/resizable). `src/components/chat/` (ChatPanel, ChatMessage, ChatInput, ThoughtChain tool-call viz, RetrievalCard), `editor/` (InspectorPanel Monaco for files/memory/skills/workspace), `layout/` (Navbar, Sidebar, ResizeHandle). `src/lib/store.ts` — state. Connects to backend at `http://localhost:8002` via SSE.
 
-Frontend connects to backend at `http://localhost:8002` via SSE streaming.
-
-**SSE event protocol** (emitted by `/api/chat`):
-- `token` — incremental content chunk (append to current message)
-- `tool_start` — tool invocation begins (name + input)
-- `tool_end` — tool invocation complete (output)
-- `new_response` — new assistant message segment (multi-turn tool use)
-- `done` — stream complete
-- `title` — session title generated (refresh session list)
-- `retrieval` — memory retrieval results attached to message
-- `error` — error occurred
+**SSE event protocol** (`/api/chat`): `token` (append), `tool_start`/`tool_end` (name+input/output), `new_response` (assistant segment for multi-turn tool use), `done`, `title` (session title), `retrieval` (memory results), `error`.
 
 ## Development Commands
 
-### Backend
-
 ```bash
+# Backend
 cd backend
-python -m venv .venv
-.venv\Scripts\activate        # Windows
+python -m venv .venv && .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-
-# Start API (from backend/ directory)
 uvicorn app:app --host 0.0.0.0 --port 8002 --reload
-```
 
-### Frontend
+# Frontend (port 7788)
+cd frontend && npm install && npm run dev
 
-```bash
-cd frontend
-npm install
-npm run dev       # Starts on port 7788 (see package.json)
-```
-
-### Tests
-
-```bash
-cd backend
+# Tests (from backend/)
 pytest tests/ -v
-pytest tests/test_smoke.py              # Single test file
-pytest tests/test_guardian.py           # Guardian-specific tests
-pytest tests/test_harness_security.py   # Harness security rules (34 tests)
-pytest tests/test_harness_review.py     # Harness review middleware (11 tests)
-pytest tests/test_agent_guardian_integration.py  # Agent + Guardian integration
+pytest tests/test_route_classifier.py           # Smart-routing L0/L1/L2
+pytest tests/test_harness_security.py           # 34 security-rule tests
+pytest tests/test_guardian.py                   # Guardian
+pytest tests/test_harness_review.py             # review middleware (11)
+pytest tests/test_agent_guardian_integration.py  # Agent + Guardian
+
+# Latency benchmark (from backend/)
+python scripts/benchmark_optimizations.py        # classify_query, parallel vs serial tools
+
+# Memory evaluation
+python eval_memory.py                            # from project root
+cd backend && python eval_persona_memory.py      # results: eval_results_*.json, eval_v3_report.md
 ```
 
 ## Configuration
 
-**Environment:** Copy `backend/config/.env.example` to `backend/config/.env`. Required keys: `LLM_PROVIDER` + provider-specific API key, `EMBEDDING_PROVIDER` + embedding API key.
-
-**Runtime config:** `backend/config/config.json` — runtime flags like `rag_mode`. Modified via `/api/config` endpoints.
-
-**Provider aliases** (in `config.py`): `glm`/`zhipuai`/`bigmodel` → `zhipu`; `aliyun`/`dashscope`/`qwen` → `bailian`; `siliconflow` → `deepseek`. Use any alias in `LLM_PROVIDER` or `EMBEDDING_PROVIDER`.
-
-**Key env vars:**
+Copy `backend/config/.env.example` to `backend/config/.env`. Runtime flags in `backend/config/config.json` (modified via `/api/config`). Provider aliases (`config.py`): `glm`/`zhipuai`/`bigmodel` → `zhipu`; `aliyun`/`dashscope`/`qwen` → `bailian`; `siliconflow` → `deepseek`.
 
 | Var | Purpose |
 |-----|---------|
 | `LLM_PROVIDER` | zhipu / bailian / deepseek / openai |
 | `MEMORY_BACKEND` | off / v3 |
-| `MEMORY_V3_INJECT` | always / tool / off (default: always) |
-| `GUARDIAN_ENABLED` | true/false — prompt injection pre-filter |
-| `GUARDIAN_FAIL_MODE` | closed (block on error) / open (allow on error) |
-| `SUMMARIZATION_ENABLED` | Enable conversation compression middleware |
-| `CHECKPOINTER` | Set to `postgres` for Postgres-backed state persistence |
-| `LANGFUSE_SECRET_KEY/PUBLIC_KEY/BASE_URL` | Optional Langfuse tracing |
-| `HARNESS_ENABLED` | Master switch for Harness system (default true) |
-| `HARNESS_SECURITY_ENABLED` | Tool-level security interception (default true) |
-| `HARNESS_REVIEW_ENABLED` | Post-conversation auto-review (default true) |
-| `HARNESS_RULES_PATH` | Path to security rules YAML (default `config/harness_rules.yaml`) |
+| `MEMORY_V3_INJECT` | always (default) / tool / off |
+| `MEMORY_V3_RECALL_STRATEGY` | hybrid (default) / keyword / embedding |
+| `MEMORY_V3_PIPELINE_EVERY_N`, `_L1_IDLE_TIMEOUT`, `_L2_DELAY_AFTER_L1`, `_L2_MAX_INTERVAL`, `_L3_TRIGGER_EVERY_N` | L1/L2/L3 cadence |
+| `MEMORY_V3_DENSE_TOP_K`, `_KEYWORD_TOP_K`, `_FINAL_TOP_K`, `_INJECT_TOP_K` | recall limits |
+| `GUARDIAN_ENABLED` / `GUARDIAN_FAIL_MODE` / `GUARDIAN_TIMEOUT_MS` | injection pre-filter, closed/open, 5000ms |
+| `SUMMARIZATION_ENABLED` / `_TRIGGER_MESSAGES` / `_KEEP_MESSAGES` | compression on, trigger 50, keep 20 |
+| `CHECKPOINTER` | `postgres` for state persistence |
+| `MINERU_TOKEN` (+ `_BASE_URL`/`_MODEL`/`_POLL_INTERVAL`/`_MAX_WAIT`) | enable MinerU parser in ingest; else PyMuPDF |
+| `ARXIV_DIGEST_ENABLED` / `ARXIV_DIGEST_HOUR` / `WECHAT_WEBHOOK_KEY` | daily digest |
+| `LANGFUSE_SECRET_KEY` / `PUBLIC_KEY` / `BASE_URL` | optional tracing |
+| `HARNESS_ENABLED` / `HARNESS_SECURITY_ENABLED` / `HARNESS_REVIEW_ENABLED` / `HARNESS_RULES_PATH` | Harness master + sub-switches (all default true), rules YAML path |
 
 ## Key Design Patterns
 
-- **Middleware chain:** Guardian (`before_agent`) → HarnessSecurity (`wrap_tool_call`) → ContextOffload (`before_model`, `wrap_tool_call`) → Summarization (`before_model`) → HarnessReview (`after_agent`). Each middleware implements a subset of 7 available hooks from LangChain's `AgentMiddleware` base class.
-- **File-as-memory:** Sessions persist as `backend/sessions/*.json`. L0 raw messages as `memory_module_v3/l0/{session_id}.json`. L2 scenes as `memory_module_v3/scenes/*.md`. L3 persona as `memory_module_v3/persona.md`.
-- **Idempotent distillation:** After each chat turn, background task distills new exchanges only (deterministic exchange_id). Uses `DISTILL_*` model if configured, otherwise main LLM.
-- **Provider aliasing:** `config.py` maps aliases (e.g., `glm`→`zhipu`, `aliyun`→`bailian`, `dashscope`→`bailian`) for flexible env var configuration.
-- **Checkpointer reconnect:** `chat.py` catches recoverable Postgres connection errors and retries once after reconnecting.
-- **Harness rules hot-reload:** `config/harness_rules.yaml` is cached in memory with file mtime check. Editing the YAML takes effect on the next tool call without restarting the backend.
-- **CI harness check:** `.github/harness-check.yml` runs on PR/push — validates harness rules YAML schema and runs harness-specific tests.
-- **Claude Code hooks:** `.claude/hooks/*.mjs` implement the automated review loop. `pre-tool-check.mjs` intercepts dangerous operations (`.env` protection, dangerous commands). `session-context.mjs` injects git status on session start. `session-review.mjs` generates a review report to `.claude/reviews/` on stop. `pre-compact.mjs` preserves critical context before compaction. Hooks are configured in `.claude/settings.json`. **Path convention:** hook commands use `node .claude/hooks/...` (relative to `miniOpenClaw-main/` working directory) since `settings.json` and hooks both live under `miniOpenClaw-main/.claude/`.
+- **Middleware chain** — Guardian(`before_agent`) → HarnessSecurity(`wrap_tool_call`) → ContextOffload(`before_model`,`wrap_tool_call`) → Summarization(`before_model`) → HarnessReview(`after_agent`). Each implements a subset of LangChain `AgentMiddleware`'s hooks (`before_agent` / `before_model` / `after_model` / `after_agent` / `wrap_model_call` / `wrap_tool_call`).
+- **File-as-memory** — `sessions/*.json`, L0 `l0/{session}.json`, L2 `scenes/*.md`, L3 `persona.md`.
+- **Idempotent distillation** — after each turn, a background task distills only new exchanges (deterministic `exchange_id`); uses `DISTILL_*`/fast LLM.
+- **Checkpointer reconnect** — `chat.py` catches recoverable Postgres errors, reconnects, retries once.
+- **Harness rules hot-reload** — `harness_rules.yaml` cached with mtime check; edits apply on next tool call, no restart.
+- **CI** — `.github/workflows/harness-check.yml` runs `node scripts/check.mjs` (lint + type-check) and `npm test` (vitest) on push/PR.
+- **`.claude/` harness removed from repo** (commit `4cef8ed`) — no `.claude/hooks/*.mjs` or tracked `settings.json`; only `.claude/settings.local.json` (local perms). Don't reference deleted hook scripts.
 
 ## Documentation
 
-`docs/` contains detailed architecture walkthroughs beyond what CLAUDE.md covers:
-- `memory_system.md` — Full memory system overview (v2 vs v3, all config vars)
-- `memory_v3_implementation_walkthrough.md` — Step-by-step v3 pipeline code walkthrough
-- `offload_pipeline_example.md` — End-to-end example: tool call → L1 summary → L2 Mermaid → L3 compression
-- `academic_agent_deep_dive.md` — Agent architecture deep dive
-- `arxiv_digest_system.md` — arXiv paper ingestion pipeline: RSS fetching, dual filtering, LLM analysis, wiki page creation, WeChat push
-- `knowledge_entropy_management.md` — Wiki knowledge management: 8 tools, entity types, entropy governance, automated lint/backfill
+`docs/` (Chinese-named) holds detailed walkthroughs — `00-总览-PaperMind-Agent-项目文档.md`, `01-记忆-四层金字塔详解.md` / `-场景举例.md` / `-源码级实现走读.md`, `02-Wiki-arXiv自动消化推送.md` / `-三层架构与熵管理.md`, `03-治理-ContextOffload管线实例.md` / `-中间件链与会话管理.md`, `04-参考-全链路流程例子解构.md` / `-工具调用原理.md` / `-项目概要.md`. `docs/latency_optimization_summary.md` documents the latency layer — read alongside `graph/route_classifier.py`, `parallel_tools.py`, `memory_module_v3/retrieval/service.py`, `graph/llm.py`.
 
-## Evaluation
+## Scripts & Infrastructure
 
-```bash
-# Memory system evaluation (run from project root)
-python eval_memory.py
-
-# Persona memory evaluation (run from backend/)
-cd backend && python eval_persona_memory.py
-```
-
-Results saved as `eval_results_*.json`. See `eval_v3_report.md` for baseline comparison.
-
-## Scripts
-
-- `scripts/check.mjs` — Pre-commit checks (lint, type-check)
-- `scripts/init.mjs` — Project initialization (dependencies, config)
-- `scripts/upgrade.mjs` — Dependency upgrade helper
-- `scripts/gc-scan.mjs` — Garbage collection scan for project health
-
-## Infrastructure Requirements
-
-- Python 3.10+
-- Node.js 18+
-- PostgreSQL with pgvector extension (for L1 facts, pipeline state, and optional checkpointer)
-- Optional: Langfuse (has its own Postgres — can share with pgvector image)
+`scripts/{check,init,upgrade,gc-scan}.mjs`. Requires Python 3.10+, Node 18+, PostgreSQL+pgvector (L1 facts, pipeline state, optional checkpointer); optional Langfuse.
 
 # 行为准则（Karpathy 原则）
 
-## Think Before Coding
-- 假设必须说清楚，不确定就问
-- 有多个方案时列出，不要默默选一个
-- 有更简单的方法就说出来
+- **Think Before Coding** — 假设必须说清楚，不确定就问；有多个方案列出，不默默选一个；有更简单的方法就说出来。
+- **消除信息差** — 用户描述有歧义或缺失时先追问再动手；即使指令看似完整也多想一步（逻辑漏洞、被忽略的前提）；质疑要带证据（问题 + 替代方案）；"就这样做"不意味着对——双方可能有你看不到的盲区。
+- **讨论与执行分离** — 讨论阶段只分析、提问、列方案，不改文件；不自己判断"讨论够了"——问出口才算数；用户明确同意后才动手，一次只做一件事。
+- **Simplicity First** — 不多写一行没被要求的代码；不加不需要的抽象/配置/灵活性；200 行能缩成 50 行就重写。
+- **Surgical Changes** — 只动必须动的代码，不顺手"改善"无关代码；不重构没坏的东西；每行改动都应能追溯到用户请求。
+- **Goal-Driven Execution** — 每个任务转成可验证的目标；多步骤先列计划再动手。
 
-## 消除信息差
-- **追问**：用户描述有歧义或缺失关键信息时，先追问再动手
-- **质疑**：即使指令看似完整，也多想一步——有没有逻辑漏洞？有没有被忽略的前提？
-- 质疑要带证据：说出你观察到的问题 + 给出替代方案
-- 用户说"就这样做"不意味着就是对的——双方可能存在你看不到的盲区
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
 
-## 讨论与执行分离
-- 讨论阶段只分析、提问、列方案，不修改文件
-- 不要自己判断"讨论已经够了"——问出口才算数
-- 用户明确同意执行后才动手，一次只做一件事
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
 
-## Simplicity First
-- 不多写一行没被要求的代码
-- 不加不需要的抽象、配置、灵活性
-- 如果写了 200 行但能缩成 50 行，重写
+### When to use graph tools FIRST
 
-## Surgical Changes
-- 只动必须动的代码，不顺手"改善"无关代码
-- 不重构没坏的东西
-- 每行改动的代码都应能追溯到用户请求
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
-## Goal-Driven Execution
-- 每个任务转成可验证的目标
-- 多步骤任务先列计划再动手
+Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
-# 全局约定
+### Key Tools
 
-- **规则放 CLAUDE.md，工作流放 Skills**
-- 涉及文件操作先问用户意图
-- 每次对话只给 AI 看需要的内容，避免无关上下文稀释注意力
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
 
-# 自动审查闭环
+### Workflow
 
-- SessionStart 自动注入 git 状态
-- PreToolUse 自动拦截危险操作（.env 保护、危险命令）
-- Stop 自动生成审查报告至 .claude/reviews/（按日期累积）
-- 下次 SessionStart 自动加载最近几次审查记录
-
-# 成熟度路线图
-
-| 级别 | 名称 | 标志 | 状态 |
-|:---:|---|----|----|
-| L0 | 裸用 | 没有 CLAUDE.md | — |
-| L1 | 规则层 | 有 CLAUDE.md + 行为准则 | — |
-| L2 | 反馈回路 | PreToolUse + SessionStart + Stop 已激活 | ✅ |
-| **L3** | **自动修正** | **加上 PostToolUse 后自动格式化** | **← 当前** |
-| L4 | 自治系统 | Agent 定期扫描代码/文档一致性，自动发起修复 PR | — |
-
-# Skill 路由
-
-根据项目技术栈和任务类型，推荐以下 Skill：
-
-| 任务类型 | Skill | 触发条件 |
-|---------|-------|---------|
-| Harness 管理 | harness-init / harness-mode | 用户要求调整 Harness 配置 |
-| 前端组件开发 | frontend-design | 涉及 .tsx / .jsx 文件修改 |
-| 代码简化 | simplify | 重构或清理代码后 |
-| 调试 | systematic-debugging | 遇到 bug 或测试失败 |
-| 代码审查 | requesting-code-review | 完成功能开发后 |
-
-> Agent 在遇到对应任务时，应优先调用路由表中的 Skill。
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern="tests_for" to check coverage.

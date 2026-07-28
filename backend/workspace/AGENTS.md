@@ -1,5 +1,13 @@
 # Agent Guide — 学术研究助手工作规范
 
+## 运行环境
+
+你运行在 **Windows** 系统上，Shell 为 **PowerShell 5.1**。
+- Shell 命令使用 PowerShell 语法，**不能**使用 Unix 命令（`find`、`grep`、`ls`、`pwd`、`cat` 等）或 bash 语法（`&&` 链式连接、`2>/dev/null` 重定向）
+- 查找文件用 `Get-ChildItem -Recurse -Filter`，搜索内容用 `Select-String`
+- 路径分隔符为反斜杠 `\`，但 `/` 也可在大多数场景使用
+- 工作目录是 `backend/`，构造路径时注意不要叠加成 `backend/backend/...`
+
 ## 核心原则
 
 1. **Wiki 优先**。回答学术问题时，先查询 `wiki/` 知识库。只有 wiki 中没有相关内容时，才对原始论文做一次性分析。
@@ -17,6 +25,7 @@
 | `save_wiki_page` | 保存 wiki 页面 | 创建/更新论文、概念、方法等页面 |
 | `read_wiki_page` | 读取 wiki 页面 | 查询已有知识 |
 | `list_wiki_pages` | 列出 wiki 页面 | 浏览知识库、查找相关页面 |
+| `list_source_files` | 列出 raw/sources/ 文件及注册状态 | 查找未注册的 PDF、定位用户上传的文件 |
 | `query_wiki` | 混合检索 wiki（BM25+embedding） | 回答学术问题前的检索 |
 | `rebuild_index` | 重建索引 | ingest 完成后 |
 | `append_log` | 记录操作日志 | 每次 wiki 修改后 |
@@ -99,9 +108,12 @@ Transformer 的并行化优势使其在长序列任务上显著优于 RNN。
 
 当用户提供 PDF、arXiv 链接或粘贴论文内容时：
 
-1. **注册原始资料** — `register_source`，复制到 `raw/sources/`，计算 SHA-256 哈希写入 `manifest.jsonl`
-2. **查重** — 哈希已存在则跳过或提示用户确认更新
-3. **解析论文** — `pdf_parser` 提取文本、元信息、摘要
+> **硬规则：必须先解析 PDF，再注册和创建页面。绝对不要用用户的 prompt 文本或对话内容当作论文标题/内容。如果找不到 PDF 路径，先用 `list_source_files` 查找，不要猜测。**
+
+0. **定位文件** — 如果用户说"上传的 PDF"但没给路径，用 `list_source_files`（或 `list_source_files show='unregistered'`）按修改时间排序找到最近上传的 PDF
+1. **解析论文** — `pdf_parser` 提取文本、标题、作者、摘要。**这一步不可跳过**——后续所有 slug、title 都必须来自解析结果
+2. **注册原始资料** — `register_source`，用解析出的 title 作为 title 参数。复制到 `raw/sources/`，计算 SHA-256 哈希写入 `manifest.jsonl`。`register_source` 对 PDF 会自动从文件第一页提取标题
+3. **查重** — 哈希已存在则跳过或提示用户确认更新
 4. **生成论文页面** — `save_wiki_page` 创建 `wiki/papers/<slug>.md`，提取 12 项内容：标题、作者、研究背景、核心问题、方法概述、关键技术细节、实验结果、主要贡献、局限性、关键概念、相关方法、涉及数据集
 5. **提取实体** — 为论文中的关键概念、方法、数据集创建独立页面
 6. **创建/更新作者页** — 每位作者检查是否已有页面，无则创建，有则追加新论文信息

@@ -41,11 +41,18 @@ SUMMARY_PROMPT_ZH = """你是上下文提取助手。你的唯一任务是从以
 ## 摘要
 记录对话中最重要的上下文，包括关键选择、结论、策略，以及重要决策的理由。记录被否决的方案及原因。
 
+## 已确认的关键事实
+列出对话中**已通过工具验证**的事实（不是猜测），例如：
+- 已读取的文件及其关键结论
+- 已确认的根因（如"BOM 导致 frontmatter 解析失败"）
+- 已排除的假设（如"文件实际在 wiki/methods/ 而非 wiki/papers/"）
+这些事实在后续工作中**不应再被重新验证**，直接使用即可。
+
 ## 产出物
 创建、修改或访问了哪些文件、资源？列出具体文件路径和变更描述。
 
 ## 后续步骤
-还有哪些具体任务待完成？下一步应该做什么？
+还有哪些具体任务待完成？下一步应该做什么？列出明确的 action items。
 
 请仔细阅读以下对话历史，提取最重要的上下文来替换它，以释放对话空间。
 只输出提取的上下文，不要包含任何额外的解释或说明。
@@ -55,8 +62,8 @@ SUMMARY_PROMPT_ZH = """你是上下文提取助手。你的唯一任务是从以
 </messages>"""
 
 # 默认：消息数达到 50 触发压缩，保留最近 20 条
-DEFAULT_SUMMARIZATION_TRIGGER_MESSAGES = 50
-DEFAULT_SUMMARIZATION_KEEP_MESSAGES = 20
+DEFAULT_SUMMARIZATION_TRIGGER_MESSAGES = 80
+DEFAULT_SUMMARIZATION_KEEP_MESSAGES = 30
 
 
 def _summarization_trigger_messages() -> int:

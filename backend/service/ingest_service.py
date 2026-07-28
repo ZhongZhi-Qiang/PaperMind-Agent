@@ -59,7 +59,28 @@ async def process_pdf_upload(
         except Exception as e:
             logger.warning("MinerU exception, falling back: %s", e)
 
-    # Fallback to PyMuPDF
+    # Fallback: download from URL if we only have a URL and no local file yet
+    if parsed is None and pdf_url and not file_path:
+        try:
+            import tempfile
+            import urllib.request
+
+            logger.info("Downloading PDF from URL for PyMuPDF fallback: %s", pdf_url)
+            req = urllib.request.Request(
+                pdf_url,
+                headers={"User-Agent": "PaperMind-Agent/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            tmp.write(data)
+            tmp.close()
+            file_path = tmp.name
+            logger.info("Downloaded PDF (%d bytes) to %s", len(data), file_path)
+        except Exception as e:
+            logger.warning("Failed to download PDF from URL: %s", e)
+
+    # PyMuPDF fallback
     if parsed is None and file_path:
         parsed = _parse_pdf(str(file_path))
         if "error" in parsed:
@@ -87,7 +108,7 @@ async def process_pdf_upload(
 
     paper = ArxivPaper(
         arxiv_id="",
-        title=user_title or parsed.get("title") or "User Uploaded Paper",
+        title=parsed.get("title") or user_title or "User Uploaded Paper",
         authors=_split_authors(parsed.get("authors", "")),
         abstract=parsed.get("abstract", "")[:2000],
         pdf_url=pdf_url or "",
