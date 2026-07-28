@@ -140,6 +140,72 @@ def _download_and_unzip(zip_url: str) -> str:
         return ""
 
 
+def _extract_title_from_md(text: str) -> str:
+    """Extract title from markdown — first H1 heading or first substantial line."""
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("# ") and len(line) > 3:
+            return line[2:].strip()
+    # fallback: first non-empty line that isn't a header pattern
+    for line in text.split("\n")[:10]:
+        line = line.strip()
+        if line and len(line) > 5 and not line.startswith(">"):
+            # skip lines that look like metadata
+            if any(kw in line.lower() for kw in ["arxiv", "preprint", "http", "doi:", "volume"]):
+                continue
+            return line[:200]
+    return ""
+
+
+def _extract_authors_from_md(text: str) -> str:
+    """Extract authors from markdown — collect lines between title and first ## section."""
+    import re as _re
+    lines = text.split("\n")
+    found_title = False
+    author_parts: list[str] = []
+
+    for line in lines[:40]:
+        stripped = line.strip()
+        if stripped.startswith("# ") and not found_title:
+            found_title = True
+            continue
+        if not found_title or not stripped:
+            continue
+        # Stop at section headers
+        if stripped.startswith("## "):
+            break
+        lower = stripped.lower()
+        # Skip lines that are license notices or affiliation-only
+        if any(kw in lower for kw in ["provided proper attribution", "google hereby grants"]):
+            continue
+
+        # Clean HTML/superscript tags, then extract name part (before email/URL)
+        cleaned = _re.sub(r"<[^>]+>", "", stripped)
+        # Remove parenthesized affiliations: (Google Brain), (Equal Contribution), etc.
+        cleaned = _re.sub(r"\([^)]*(?:university|institute|college|lab|google|deepmind|meta|microsoft|openai|equal|joint|correspond)[^)]*\)", "", cleaned, flags=_re.IGNORECASE)
+        # Remove emails
+        cleaned = _re.sub(r"\S+@\S+", "", cleaned)
+        # Remove URLs
+        cleaned = _re.sub(r"https?://\S+", "", cleaned)
+        # Remove footnote markers like ∗, †, ‡, §, ¶, 1, 2 etc. at start/end
+        cleaned = _re.sub(r"^[\*\†\‡\§\¶\d\s]+", "", cleaned)
+        cleaned = _re.sub(r"[\*\†\‡\§\¶\d]+$", "", cleaned)
+        cleaned = cleaned.strip().rstrip(",").strip()
+
+        if cleaned and len(cleaned) > 1:
+            author_parts.append(cleaned)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for a in author_parts:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+    result = ", ".join(unique)
+    return result[:500] if result else ""
+
+
 def _normalize_content(raw: dict[str, Any], file_url: str = "") -> dict[str, Any]:
     """Convert MinerU response data to _parse_pdf-compatible dict."""
     full_text = ""
@@ -166,6 +232,12 @@ def _normalize_content(raw: dict[str, Any], file_url: str = "") -> dict[str, Any
     authors = meta.get("authors", "")
     if isinstance(authors, list):
         authors = ", ".join(authors)
+
+    # Fallback: extract title/authors from full_text if MinerU didn't return them
+    if not title and full_text:
+        title = _extract_title_from_md(full_text)
+    if not authors and full_text:
+        authors = _extract_authors_from_md(full_text)
 
     page_count = raw.get("progress", {}).get("total_pages", 0)
 
@@ -222,3 +294,125 @@ def parse_via_mineru(
         return data
 
     return _normalize_content(data, file_url)
+
+
+def parse_via_mineru_file(
+    file_path: str,
+    *,
+    base_url: str,
+    token: str,
+    model_version: str = "vlm",
+    enable_formula: bool = True,
+    enable_table: bool = True,
+    language: str = "ch",
+    poll_interval: int = 3,
+    max_wait: int = 300,
+) -> dict[str, Any]:
+    """Upload a local file to MinerU and parse it.
+
+    Uses the file-upload API flow:
+    1. Request a signed upload URL via /file-urls/batch
+    2. PUT the file to that URL
+    3. Poll /extract-results/batch/{batch_id} until done
+
+    Returns dict with keys matching _parse_pdf output, or {"error": "..."} on failure.
+    """
+    from pathlib import Path
+
+    path = Path(file_path)
+    if not path.exists():
+        return {"error": f"File not found: {file_path}"}
+    if not path.is_file():
+        return {"error": f"Not a file: {file_path}"}
+
+    file_size = path.stat().st_size
+    if file_size > 200 * 1024 * 1024:
+        return {"error": f"File too large for MinerU: {file_size} bytes (max 200MB)"}
+
+    # ── Step 1: Request signed upload URL ──
+    try:
+        resp = httpx.post(
+            f"{base_url}/file-urls/batch",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
+            json={
+                "files": [
+                    {
+                        "name": path.name,
+                        "data_id": path.stem[:128],
+                    }
+                ],
+                "model_version": model_version,
+                "enable_table": enable_table,
+                "enable_formula": enable_formula,
+                "language": language,
+            },
+            timeout=_HTTP_TIMEOUT,
+        )
+        create_result = resp.json()
+        if create_result.get("code") != 0:
+            return {"error": f"MinerU file-urls batch failed: {create_result.get('msg', 'unknown')}"}
+
+        batch_id = create_result["data"]["batch_id"]
+        upload_url = create_result["data"]["file_urls"][0]
+        logger.info("MinerU file upload batch created: %s for %s", batch_id, path.name)
+    except httpx.HTTPError as e:
+        return {"error": f"MinerU file-urls HTTP error: {e}"}
+    except Exception as e:
+        return {"error": f"MinerU file-urls error: {e}"}
+
+    # ── Step 2: Upload file to signed URL ──
+    try:
+        with path.open("rb") as f:
+            upload_resp = httpx.put(
+                upload_url,
+                content=f.read(),
+                timeout=300.0,
+            )
+            upload_resp.raise_for_status()
+        logger.info("MinerU file uploaded: %s (%d bytes)", path.name, file_size)
+    except httpx.HTTPError as e:
+        return {"error": f"MinerU file upload HTTP error: {e}"}
+    except Exception as e:
+        return {"error": f"MinerU file upload error: {e}"}
+
+    # ── Step 3: Poll for results ──
+    result_url = f"{base_url}/extract-results/batch/{batch_id}"
+    start = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed > max_wait:
+            return {"error": f"MinerU file task timed out after {max_wait}s (batch_id={batch_id})"}
+
+        try:
+            result_resp = httpx.get(
+                result_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_HTTP_TIMEOUT,
+            )
+            result = result_resp.json()
+        except Exception as e:
+            logger.warning("MinerU poll batch error: %s", e)
+            time.sleep(poll_interval)
+            continue
+
+        if result.get("code") != 0:
+            return {"error": f"MinerU batch poll failed: {result.get('msg', 'unknown')}"}
+
+        items = result.get("data", {}).get("extract_result", [])
+        if not items:
+            time.sleep(poll_interval)
+            continue
+
+        item = items[0]
+        state = item.get("state", "")
+
+        if state == "done":
+            logger.info("MinerU file task done: batch_id=%s", batch_id)
+            return _normalize_content(item, str(path))
+        if state == "failed":
+            return {"error": f"MinerU file task failed: {item.get('err_msg', 'unknown')}"}
+
+        time.sleep(poll_interval)

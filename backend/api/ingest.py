@@ -58,6 +58,7 @@ async def ingest_pdf(
     async def event_stream():
         from service.ingest_service import process_pdf_upload
 
+        ingest_ok = False
         try:
             async for event in process_pdf_upload(
                 file_path=file_path,
@@ -65,6 +66,8 @@ async def ingest_pdf(
                 user_title=title,
                 base_dir=base_dir,
             ):
+                if event.get("event") == "done":
+                    ingest_ok = True
                 yield sse_event(event.pop("event"), event)
         except Exception as e:
             yield sse_event("error", {"error": str(e)})
@@ -75,6 +78,11 @@ async def ingest_pdf(
                     Path(tmp_file.name).unlink(missing_ok=True)
                 except Exception:
                     pass
+
+        # Fire-and-forget: run wiki lint + auto-fix asynchronously after
+        # the SSE stream ends, so the user sees the paper summary first.
+        if ingest_ok:
+            asyncio.create_task(_background_lint(base_dir))
 
     return StreamingResponse(
         event_stream(),
@@ -88,3 +96,48 @@ async def ingest_pdf(
 
 async def _single_error(msg: str):
     yield sse_event("error", {"error": msg})
+
+
+async def _background_lint(base_dir: Path) -> None:
+    """Run wiki lint with auto-fix in the background after a successful ingest.
+
+    Runs after the SSE stream has already closed, so lint results don't
+    block or distract from the paper summary shown to the user.
+    """
+    import json as _json
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    try:
+        from tools.wiki_engine_tool import LintWikiTool
+
+        _logger.info("Background lint started after ingest")
+        lint_tool = LintWikiTool(root_dir=base_dir)
+        result_str = await asyncio.to_thread(
+            lint_tool._run, auto_fix=True, backfill=True, run_manager=None,
+        )
+        result = _json.loads(result_str)
+
+        issues = result.get("issues", {})
+        fixes = result.get("fixes_applied", [])
+        backfill = result.get("backfill", {})
+
+        parts = []
+        if issues.get("total", 0) > 0:
+            parts.append(
+                f"{issues['total']} issues "
+                f"(red={issues.get('red', 0)}, "
+                f"yellow={issues.get('yellow', 0)}, "
+                f"blue={issues.get('blue', 0)})"
+            )
+        if fixes:
+            parts.append(f"{len(fixes)} fixes applied")
+        if backfill.get("papers_processed", 0) > 0:
+            parts.append(f"{backfill['papers_processed']} papers backfilled")
+
+        if parts:
+            _logger.info("Background lint completed: %s", "; ".join(parts))
+        else:
+            _logger.info("Background lint completed: wiki healthy")
+    except Exception as e:
+        _logger.error("Background lint failed: %s", e)

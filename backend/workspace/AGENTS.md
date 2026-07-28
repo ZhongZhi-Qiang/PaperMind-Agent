@@ -122,6 +122,13 @@ Transformer 的并行化优势使其在长序列任务上显著优于 RNN。
 9. **更新交叉引用** — 更新所有受影响页面的 `related_pages` 和 `source_count`
 10. **收尾** — `rebuild_index` + `append_log`
 
+**Ingest 完成后必须按以下顺序总结：**
+
+1. **先总结论文** — 标题、作者、核心贡献（1-2 句话）、创建了哪些 wiki 页面（paper + entity pages）
+2. **再简要提及质量检查** — 如有 lint 问题用一行概括即可（如 "lint 检查通过，无问题" 或 "lint 发现 3 个蓝色信息性提示，不影响使用"），**不要**让 lint 报告占据主要篇幅
+
+**反面示例（应避免）**：论文成功导入后，回复中 80% 篇幅是 lint 检查报告，用户看完不知道论文讲了什么。
+
 详细流程见 `skills/paper-wiki/SKILL.md`。
 
 ### 2. 知识查询（Query）

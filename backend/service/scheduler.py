@@ -80,44 +80,49 @@ async def run_daily_digest():
         except Exception:
             logger.error("Failed to send error notification")
 
-    # 5. Post-digest lint: auto-fix structure + backfill missing entity pages
-    try:
-        await run_post_digest_lint()
-    except Exception as e:
-        logger.error("Post-digest lint failed: %s", e)
+    # 5. Post-digest lint: fire-and-forget (runs async, won't block digest completion)
+    asyncio.create_task(_run_post_digest_lint_async())
 
 
-async def run_post_digest_lint():
-    """Run wiki lint with auto-fix and backfill after digest completes."""
+async def _run_post_digest_lint_async():
+    """Run wiki lint with auto-fix and backfill after digest completes.
+
+    Designed to be called via asyncio.create_task (fire-and-forget) so it
+    doesn't block the digest job from completing while lint runs.
+    Errors are logged but not re-raised.
+    """
     from config import get_settings
     from tools.wiki_engine_tool import LintWikiTool
     import json as _json
 
-    settings = get_settings()
-    base_dir = settings.backend_dir
+    try:
+        settings = get_settings()
+        base_dir = settings.backend_dir
 
-    logger.info("Starting post-digest lint (auto_fix + backfill)")
-    lint_tool = LintWikiTool(root_dir=base_dir)
+        logger.info("Post-digest lint started (background)")
+        lint_tool = LintWikiTool(root_dir=base_dir)
 
-    result_str = await asyncio.to_thread(lint_tool._run, auto_fix=True, backfill=True, run_manager=None)
-    result = _json.loads(result_str)
+        result_str = await asyncio.to_thread(lint_tool._run, auto_fix=True, backfill=True, run_manager=None)
+        result = _json.loads(result_str)
 
-    issues = result.get("issues", {})
-    fixes = result.get("fixes_applied", [])
-    backfill = result.get("backfill", {})
+        issues = result.get("issues", {})
+        fixes = result.get("fixes_applied", [])
+        backfill = result.get("backfill", {})
 
-    summary_parts = []
-    if issues.get("total", 0) > 0:
-        summary_parts.append(f"{issues['total']} issues (red={issues.get('red', 0)}, yellow={issues.get('yellow', 0)}, blue={issues.get('blue', 0)})")
-    if fixes:
-        summary_parts.append(f"{len(fixes)} fixes applied")
-    if backfill.get("papers_processed", 0) > 0:
-        summary_parts.append(f"{backfill['papers_processed']} papers backfilled")
+        summary_parts = []
+        if issues.get("total", 0) > 0:
+            summary_parts.append(f"{issues['total']} issues (red={issues.get('red', 0)}, yellow={issues.get('yellow', 0)}, blue={issues.get('blue', 0)})")
+        if fixes:
+            summary_parts.append(f"{len(fixes)} fixes applied")
+        if backfill.get("papers_processed", 0) > 0:
+            summary_parts.append(f"{backfill['papers_processed']} papers backfilled")
 
-    if summary_parts:
-        logger.info("Post-digest lint completed: %s", "; ".join(summary_parts))
-    else:
-        logger.info("Post-digest lint completed: wiki healthy, no action needed")
+        if summary_parts:
+            logger.info("Post-digest lint completed: %s", "; ".join(summary_parts))
+        else:
+            logger.info("Post-digest lint completed: wiki healthy, no action needed")
+    except Exception as e:
+        logger.error("Post-digest lint failed: %s", e)
 
 
 def start_scheduler():

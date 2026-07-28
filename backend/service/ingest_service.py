@@ -38,26 +38,47 @@ async def process_pdf_upload(
     parsed = None
     source = "pymupdf"
 
-    # Try MinerU if URL provided and token configured
-    if pdf_url and settings.mineru_token:
-        try:
-            from tools.mineru_client import parse_via_mineru
+    # ── MinerU paths (token required) ──
+    if settings.mineru_token:
+        if pdf_url:
+            # Path 1: URL → MinerU URL API
+            try:
+                from tools.mineru_client import parse_via_mineru
+                parsed = parse_via_mineru(
+                    pdf_url,
+                    base_url=settings.mineru_base_url,
+                    token=settings.mineru_token,
+                    model_version=settings.mineru_default_model,
+                    poll_interval=settings.mineru_poll_interval,
+                    max_wait=settings.mineru_max_wait,
+                )
+                if "error" in parsed:
+                    logger.warning("MinerU URL failed, will try other paths: %s", parsed["error"])
+                    parsed = None
+                else:
+                    source = "mineru"
+            except Exception as e:
+                logger.warning("MinerU URL exception: %s", e)
 
-            parsed = parse_via_mineru(
-                pdf_url,
-                base_url=settings.mineru_base_url,
-                token=settings.mineru_token,
-                model_version=settings.mineru_default_model,
-                poll_interval=settings.mineru_poll_interval,
-                max_wait=settings.mineru_max_wait,
-            )
-            if "error" in parsed:
-                logger.warning("MinerU failed, falling back: %s", parsed["error"])
-                parsed = None
-            else:
-                source = "mineru"
-        except Exception as e:
-            logger.warning("MinerU exception, falling back: %s", e)
+        if parsed is None and file_path:
+            # Path 2: Local file → MinerU file upload API
+            try:
+                from tools.mineru_client import parse_via_mineru_file
+                parsed = parse_via_mineru_file(
+                    file_path,
+                    base_url=settings.mineru_base_url,
+                    token=settings.mineru_token,
+                    model_version=settings.mineru_default_model,
+                    poll_interval=settings.mineru_poll_interval,
+                    max_wait=settings.mineru_max_wait,
+                )
+                if "error" in parsed:
+                    logger.warning("MinerU file upload failed, falling back: %s", parsed["error"])
+                    parsed = None
+                else:
+                    source = "mineru"
+            except Exception as e:
+                logger.warning("MinerU file upload exception: %s", e)
 
     # Fallback: download from URL if we only have a URL and no local file yet
     if parsed is None and pdf_url and not file_path:
@@ -176,13 +197,24 @@ async def process_pdf_upload(
         logger.warning("Index rebuild / log append failed: %s", e)
 
     # ── Done ──
+    # Extract a brief summary from the analysis (first meaningful paragraph)
+    summary = ""
+    for line in analysis.split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#") and len(line) > 30:
+            summary = line[:300]
+            break
+
     yield {
         "event": "done",
         "paper_slug": slug,
         "entity_slugs": entity_slugs,
         "title": paper.title,
+        "authors": ", ".join(paper.authors[:5]),
         "wiki_path": f"wiki/papers/{slug}.md",
         "entity_count": len(entity_slugs),
+        "source": source,
+        "summary": summary,
     }
 
 

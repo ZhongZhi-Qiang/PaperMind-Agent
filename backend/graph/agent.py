@@ -156,7 +156,11 @@ class AgentManager:
                 if isinstance(usage_candidate, dict):
                     last_usage = usage_candidate
 
-                # 只转发有实际文本内容的 token 事件
+                # 只转发有实际文本内容的 AI token，跳过 tool 消息（tool 结果走 tool_end 事件）
+                if mode == "messages":
+                    msg_type = getattr(chunk, "type", "")
+                    if msg_type == "tool":
+                        continue
                 text = _stringify_content(getattr(chunk, "content", ""))
                 if text:
                     if _t2 is None:

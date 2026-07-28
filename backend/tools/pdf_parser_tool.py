@@ -23,15 +23,26 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 class PDFParserInput(BaseModel):
     file_path: str = Field(
-        ...,
+        default="",
         description=(
-            "Path to a PDF file. Supports absolute paths and paths relative "
-            "to the project root (e.g. 'papers/attention.pdf')."
+            "Path to a local PDF file. Supports absolute paths and paths relative "
+            "to the project root (e.g. 'papers/attention.pdf'). "
+            "Use this for local files. Mutually exclusive with url — one must be provided."
+        ),
+    )
+    url: str = Field(
+        default="",
+        description=(
+            "URL to a PDF file (e.g. arXiv link or direct PDF link). "
+            "When provided and MinerU is configured, the remote MinerU service "
+            "is used for higher-quality parsing (formulas, tables, layout). "
+            "Falls back to downloading + local parsing if MinerU fails. "
+            "Mutually exclusive with file_path — one must be provided."
         ),
     )
     max_pages: int = Field(
         default=30,
-        description="Maximum number of pages to extract (default 30).",
+        description="Maximum number of pages to extract (default 30). Only used for local parsing.",
     )
 
 
@@ -159,13 +170,15 @@ def _parse_pdf(file_path: str, max_pages: int = 30) -> dict:
 
 
 class PDFParserTool(BaseTool):
-    """Parse academic PDFs and extract structured content (title, authors, abstract, full text)."""
+    """Parse academic PDFs — local via PyMuPDF, remote URLs via MinerU if configured."""
 
     name: str = "pdf_parser"
     description: str = (
         "Parse an academic PDF paper and extract structured content: title, authors, "
         "abstract, and full text. Returns JSON with the extracted fields. "
-        "Use this when the user provides a PDF file path and wants to analyze or wiki-ify a paper."
+        "Accepts either a local file_path OR a url (arXiv link, PDF link). "
+        "When a URL is provided, uses the MinerU remote service for higher-quality "
+        "parsing if configured, falling back to download + local parsing."
     )
     args_schema: Type[BaseModel] = PDFParserInput
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -184,12 +197,73 @@ class PDFParserTool(BaseTool):
 
     def _run(
         self,
-        file_path: str,
+        file_path: str = "",
+        url: str = "",
         max_pages: int = 30,
         run_manager: CallbackManagerForToolRun | None = None,
     ) -> str:
         import json
 
+        if not file_path and not url:
+            return "Error: either file_path or url must be provided."
+
+        # ── Try MinerU (URL or file upload) if configured ──
+        try:
+            from config import get_settings
+            settings = get_settings()
+            if settings.mineru_token:
+                if url:
+                    from tools.mineru_client import parse_via_mineru
+                    result = parse_via_mineru(
+                        url,
+                        base_url=settings.mineru_base_url,
+                        token=settings.mineru_token,
+                        model_version=settings.mineru_default_model,
+                        poll_interval=settings.mineru_poll_interval,
+                        max_wait=settings.mineru_max_wait,
+                    )
+                elif file_path:
+                    from tools.mineru_client import parse_via_mineru_file
+                    result = parse_via_mineru_file(
+                        self._resolve_path(file_path),
+                        base_url=settings.mineru_base_url,
+                        token=settings.mineru_token,
+                        model_version=settings.mineru_default_model,
+                        poll_interval=settings.mineru_poll_interval,
+                        max_wait=settings.mineru_max_wait,
+                    )
+                else:
+                    result = {"error": "no input"}
+
+                if "error" not in result and result.get("full_text"):
+                    text = result.get("full_text", "")
+                    if len(text) > 50000:
+                        result["full_text"] = text[:50000] + "\n\n...[truncated at 50000 chars]"
+                    result["text_length"] = len(text)
+                    return json.dumps(result, ensure_ascii=False, indent=2)
+                # MinerU failed → fall through to local parse or download
+        except Exception:
+            pass
+
+        # ── URL without MinerU: download + local parse ──
+        if url and not file_path:
+            import tempfile
+            import urllib.request
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "PaperMind-Agent/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = resp.read()
+                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                tmp.write(data)
+                tmp.close()
+                file_path = tmp.name
+            except Exception as e:
+                return f"Error downloading PDF from URL: {e}"
+
+        # ── Local PyMuPDF fallback ──
         resolved = self._resolve_path(file_path)
         result = _parse_pdf(resolved, max_pages)
 
@@ -206,8 +280,9 @@ class PDFParserTool(BaseTool):
 
     async def _arun(
         self,
-        file_path: str,
+        file_path: str = "",
+        url: str = "",
         max_pages: int = 30,
         run_manager: AsyncCallbackManagerForToolRun | None = None,
     ) -> str:
-        return await asyncio.to_thread(self._run, file_path, max_pages, None)
+        return await asyncio.to_thread(self._run, file_path, url, max_pages, None)
