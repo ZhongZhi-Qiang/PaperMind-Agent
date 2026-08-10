@@ -67,11 +67,11 @@
           │                  │                  │
 ┌─────────▼──────┐  ┌───────▼────────┐  ┌──────▼───────┐
 │  Wiki 知识库    │  │  长期记忆 v3    │  │  短期记忆     │
-│  (文件系统)     │  │  (PostgreSQL)   │  │  (JSONL+MMD)  │
-│  raw/sources/  │  │  l0_messages   │  │  offload-*.jl │
+│  (文件系统)     │  │  PG+文件        │  │  (JSONL+MMD)  │
+│  raw/sources/  │  │  l0/*.json     │  │  offload-*.jl │
 │  wiki/papers/  │  │  l1_facts      │  │  refs/*.md   │
-│  wiki/concepts/│  │  l2_scenes     │  │  mmds/*.mmd  │
-│  wiki/methods/ │  │  kv_store      │  │              │
+│  wiki/concepts/│  │  scenes/*.md   │  │  mmds/*.mmd  │
+│  wiki/methods/ │  │  persona.md    │  │              │
 │  wiki/authors/ │  │  pipeline_state│  │              │
 └────────────────┘  └────────────────┘  └──────────────┘
 ```
@@ -114,36 +114,35 @@
 └─────────────────────────────────────────────────┘
 ```
 
-存储在 PostgreSQL 的 `memory_v3` schema 下，共 5 张表：
+长期记忆采用**分层存储**：PostgreSQL 存 L1 事实与流水线状态，L0/L2/L3 为本地文件。
+
+PostgreSQL `memory_v3` schema 下的表：
 
 | 表 | 存储内容 | 写入时机 | 用途 |
 |----|---------|---------|------|
-| `l0_messages` | user/assistant 消息原文 + embedding | 每轮对话后 | L1 提取的素材 |
 | `l1_facts` | 结构化事实（content, type, priority, scene, embedding, tsvector） | 每 N 轮（指数退避） | 检索的核心数据 |
-| `l2_scenes` | 主题场景块（Markdown + fact_ids + embedding） | L1 后 120 秒 | 场景导航 |
 | `pipeline_state` | session 的对话计数、warmup 阈值、缓冲消息 ID | 每轮更新 | 调度触发条件 |
-| `kv_store` | key="persona" 的完整 Markdown 画像 | 50 条事实后 | 注入 system prompt |
+
+文件存储：L0 → `memory_module_v3/l0/{session_id}.json`；L2 → `memory_module_v3/scenes/*.md` + `_index.json`；L3 → `memory_module_v3/persona.md`。
 
 ### 2.2 L0：原始对话捕获
 
 **触发时机：** 每次 LLM 对话结束后自动执行（`agent.py` 的 `astream()` 结束后）。
 
 **流程：**
-1. `L0Recorder.capture()` 同步写入用户消息和助手回复到 `l0_messages` 表
-2. 异步计算 embedding（后台任务，不阻塞响应）
-3. 通知 `PipelineManager.notify_conversation()` 评估是否触发上层提取
+1. `L0Recorder.capture()` 同步写入用户消息和助手回复到 `memory_module_v3/l0/{session_id}.json` 文件
+2. 通知 `PipelineManager.notify_conversation()` 评估是否触发上层提取
 
-**特点：** 全量捕获，不做任何过滤。embedding 初始为 NULL，后台异步回填。
+**特点：** 全量捕获，不做任何过滤。L0 只做素材缓冲、不含 embedding（向量在 L1 提取时计算）。
 
-```sql
-l0_messages (
-    msg_id      BIGSERIAL PRIMARY KEY,
-    session_id  TEXT,
-    role        TEXT,        -- user / assistant
-    content     TEXT,        -- 原始消息内容
-    ts          TIMESTAMPTZ,
-    embedding   vector(1024) -- 异步计算
-)
+```json
+{
+  "session_id": "sess_research_001",
+  "messages": [
+    {"msg_id": 0, "role": "user", "content": "...", "ts": "2026-06-08T14:00:00+00:00"},
+    {"msg_id": 1, "role": "assistant", "content": "...", "ts": "2026-06-08T14:00:12+00:00"}
+  ]
+}
 ```
 
 ### 2.3 L1：原子事实提取
@@ -160,7 +159,7 @@ Buffered L0 messages
         ↓
    L1Extractor.extract()  ← LLM 提取 SceneSegment[]
         ↓
-   L1Deduplicator.dedup() ← LLM 去重决策
+   L1Deduplicator.dedup() ← 哈希去重 + 语义合并
         ↓
    写入 l1_facts 表
         ↓
@@ -175,16 +174,16 @@ Buffered L0 messages
 | `type` | persona / episodic / instruction | `episodic` |
 | `priority` | 0-10 优先级 | `7` |
 
-**Step 2 — 去重（L1Deduplicator）：** 对每个新事实搜索数据库中的相似事实，LLM 做出四种决策：
+**Step 2 — 去重（L1Deduplicator，两层）：**
+1. **内容哈希（确定性、零 LLM）**：content 归一化后哈希，与库中现有事实精确重复 → 直接丢弃
+2. **语义合并（LLM，仅对相似候选）**：用 `search_facts` 找 top-3 相似事实，命中才调 LLM 决策：
 
 | 决策 | 含义 | 操作 |
 |------|------|------|
-| `store` | 全新事实 | 直接插入 |
-| `update` | 替换旧事实 | 更新目标事实内容 |
-| `merge` | 合并新旧 | 合并为一条，合并 source_msg_ids |
-| `skip` | 重复 | 丢弃 |
+| `merge` | 与候选旧事实是同一事实 | 打上 `target_fact_id`，source_msg_ids 取并集，复用旧行 |
+| `store` | 全新 / 仅表面相似 | 直接插入 |
 
-去重策略偏激进（prompt 中写明 "be aggressive about deduplication"），避免记忆膨胀。
+LLM 只对"有相似候选"的事实调用；无候选、或 LLM/搜索失败时默认 `store`（宁存重复不丢事实）。
 
 **Step 3 — 写入 `l1_facts`：**
 
@@ -209,9 +208,10 @@ l1_facts (
 
 **触发条件（满足任一）：**
 
-1. L1 完成后等待 `l2_delay_after_l1`（默认 120 秒）
-2. 距上次 L2 超过 `l2_max_interval`（默认 3600 秒）
-3. 首次运行（有 L1 但从未跑过 L2）
+1. **数据量（主）**：自上次 L2 以来新增事实 ≥ `l2_trigger_n_facts`（默认 10），立即触发
+2. L1 完成后等待 `l2_delay_after_l1`（默认 120 秒，兜底）
+3. 距上次 L2 超过 `l2_max_interval`（默认 3600 秒，兜底）
+4. 首次运行（有 L1 但从未跑过 L2）
 
 **流程（SceneExtractor.consolidate）：**
 
@@ -221,22 +221,20 @@ l1_facts (
 
 每个场景块包含 `scene_name`（英文 snake_case 主题名）、`summary`（1-2 句摘要）、`fact_ids`（关联的 L1 事实 ID）、`content`（Markdown 格式的叙事内容）。
 
-```sql
-l2_scenes (
-    scene_id    BIGSERIAL PRIMARY KEY,
-    scene_name  TEXT UNIQUE,      -- 场景名（唯一）
-    content_md  TEXT,             -- Markdown 内容
-    fact_ids    BIGINT[],         -- 关联的 L1 fact IDs
-    updated_at  TIMESTAMPTZ,
-    embedding   vector(1024)
-)
+场景块写入 `memory_module_v3/scenes/` 目录：每个场景一个 `.md` 文件（YAML frontmatter 存 `scene_name` / `summary` / `fact_ids` / `updated_at`），外加 `_index.json` 导航索引。
+
+```text
+scenes/
+├── _index.json
+├── transformer_architecture.md
+└── bert_pretraining.md
 ```
 
 用 `upsert` 写入（按 `scene_name` 冲突更新），支持增量刷新。
 
 ### 2.5 L3：用户画像生成
 
-**触发条件：** L1 事实总数 >= `l3_trigger_every_n`（默认 50）。
+**触发条件：** 距上次 L3 新增事实 ≥ `l3_trigger_every_n`（默认 50），或距上次 L3 超过 24h（`l3_max_interval_seconds`，兜底）。
 
 **流程（PersonaGenerator.generate）：**
 
@@ -248,7 +246,7 @@ l2_scenes (
    - **Goals**：当前目标、项目、兴趣
    - **Context**：正在进行的工作、近期活动、环境
 4. 追加 Scene Navigation 部分（到各场景的链接）
-5. 存入 `kv_store` 表（key = `"persona"`）
+5. 存入 `memory_module_v3/persona.md` 文件
 
 L3 是全局单例，所有 session 共享同一个用户画像。
 
@@ -729,7 +727,7 @@ before_model → L3: 渐进式压缩 (按 score)
 | 孤立页面 | 页面未被任何其他页面引用 | `lint_wiki` 检测 + `backfill` 补全 |
 | 过时信息 | 论文结论被后续工作推翻 | `paper-update` skill 更新 |
 | 碎片化 | 概念页过多，缺乏整合 | Survey/Comparison 自动创建 |
-| 上下文污染 | 错误信息被记忆系统记住 | L1 去重（store/update/merge/skip） |
+| 上下文污染 | 错误信息被记忆系统记住 | L1 去重（哈希 + merge/store） |
 
 ### 5.2 Wiki Lint 健康检查
 
@@ -901,8 +899,10 @@ skills/
 | `MEMORY_V3_RECALL_STRATEGY` | `hybrid` | 检索策略：hybrid / keyword / embedding |
 | `MEMORY_V3_PIPELINE_EVERY_N` | `5` | 稳态下每 N 轮触发 L1 |
 | `MEMORY_V3_L1_IDLE_TIMEOUT` | `300` | L1 空闲超时（秒） |
-| `MEMORY_V3_L2_DELAY_AFTER_L1` | `120` | L1 完成后等待多久触发 L2（秒） |
-| `MEMORY_V3_L3_TRIGGER_EVERY_N` | `50` | L1 事实总数达到多少触发 L3 |
+| `MEMORY_V3_L2_DELAY_AFTER_L1` | `120` | L1 完成后等待多久触发 L2（秒，兜底） |
+| `MEMORY_V3_L2_TRIGGER_N_FACTS` | `10` | 自上次 L2 新增事实数达到多少立即触发 L2 |
+| `MEMORY_V3_L3_TRIGGER_EVERY_N` | `50` | 距上次 L3 新增事实达到多少触发 L3 |
+| `MEMORY_V3_L3_MAX_INTERVAL` | `86400` | L3 最大间隔兜底（秒，24h） |
 | `MEMORY_V3_INJECT_TOP_K` | `5` | 注入的记忆条数 |
 | `MEMORY_V3_MAX_TOTAL_RECALL_CHARS` | `3000` | 注入总字符上限 |
 

@@ -271,7 +271,7 @@ Idea 额外字段: `origin_paper`, `addresses_gap`, `priority`, `generation_path
 | 孤立页面 | 页面未被任何其他页面引用 | `lint_wiki` 检测 + `backfill` 补全 |
 | 过时信息 | 论文结论被后续工作推翻 | `paper-update` skill 更新 |
 | 碎片化 | 概念页过多，缺乏整合 | 条件触发 survey/comparison 自动创建 |
-| 上下文污染 | 错误信息被记忆系统记住 | L1 去重（store/update/merge/skip） |
+| 上下文污染 | 错误信息被记忆系统记住 | L1 去重（哈希 + merge/store） |
 
 ### 治理工具
 
