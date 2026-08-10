@@ -88,9 +88,11 @@ class MemoryV3Config:
     # L2 schedule
     l2_delay_after_l1_seconds: int = field(default_factory=lambda: _env_int("MEMORY_V3_L2_DELAY_AFTER_L1", 120))
     l2_max_interval_seconds: int = field(default_factory=lambda: _env_int("MEMORY_V3_L2_MAX_INTERVAL", 3600))
+    l2_trigger_n_facts: int = field(default_factory=lambda: _env_int("MEMORY_V3_L2_TRIGGER_N_FACTS", 10))
 
     # L3 trigger
     l3_trigger_every_n: int = field(default_factory=lambda: _env_int("MEMORY_V3_L3_TRIGGER_EVERY_N", 50))
+    l3_max_interval_seconds: int = field(default_factory=lambda: _env_int("MEMORY_V3_L3_MAX_INTERVAL", 86400))
 
     # Retrieval
     recall_strategy: MemoryV3RecallStrategy = field(default_factory=get_memory_v3_recall_strategy)

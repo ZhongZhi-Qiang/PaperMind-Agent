@@ -351,14 +351,14 @@ async def _init_v3_once():
         from memory_module_v3.storage.l1_repo import L1Repo
         from memory_module_v3.storage.l2_file_repo import L2FileRepo
         from memory_module_v3.storage.l3_file_repo import L3FileRepo
-        from memory_module_v3.storage.l2_repo import PipelineStateRepo
+        from memory_module_v3.storage.pipeline_repo import PipelineStateRepo
         from memory_module_v3.capture.l0_recorder import L0Recorder
         from memory_module_v3.pipeline.manager import PipelineManager
         from memory_module_v3.retrieval.service import RecallService
         from memory_module_v3.config import get_memory_v3_config
         from pathlib import Path
 
-        # Initialize schema (L1/L2/L3 in PostgreSQL, L0 is file-based)
+        # Initialize schema (L1 facts + pipeline state in PostgreSQL; L0/L2/L3 are file-based)
         ensure_schema()
 
         # Create repos
@@ -400,6 +400,7 @@ async def _init_v3_once():
             l0_repo, l1_repo, l2_repo, l3_repo, pipeline_repo,
             llm_fn, embedding_fn, config,
             on_change=_v3_recall_service.invalidate_cache,
+            search_fn=_v3_recall_service.search_facts,
         )
 
         # Symbolic offload (context compression) — reuse distill/fast LLM

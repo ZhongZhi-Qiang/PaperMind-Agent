@@ -31,7 +31,9 @@ def build_recall_context(recall_result: dict[str, Any], max_chars: int = 3000) -
         nav_lines = ["<scene-navigation>"]
         nav_lines.append("Scene index — use read_scene(scene_name) to load full content.")
         for s in scenes[:20]:  # Limit navigation entries
-            nav_lines.append(f"- {s['scene_name']} ({s.get('fact_count', 0)} facts)")
+            summary = (s.get("summary") or "").replace("\n", " ").strip()
+            suffix = f" — {summary}" if summary else ""
+            nav_lines.append(f"- {s['scene_name']} ({s.get('fact_count', 0)} facts){suffix}")
         nav_lines.append("</scene-navigation>")
         parts_append.append("\n".join(nav_lines))
 

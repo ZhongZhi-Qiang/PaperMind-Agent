@@ -45,3 +45,11 @@ frontend/.npm-cache/
 Thumbs.db
 # Added by code-review-graph
 .code-review-graph/
+
+# Local / machine-specific config
+.claude/
+.mcp.json
+
+# Transient test/analysis artifacts
+backend/*.pdf
+backend/scripts/lint_*.json

@@ -51,10 +51,11 @@ INCREMENTAL_SYSTEM = """You are a memory consolidation system. Your job is to me
 
 Rules:
 1. Assign each new fact to the most relevant existing scene, or create a new scene if it doesn't fit anywhere
-2. If two existing scenes have become highly overlapping, merge them into one
-3. If an existing scene has grown too large (>20 facts), consider splitting it
-4. Update scene summaries to reflect the new facts
-5. Only output scenes that were actually changed (new or modified)
+2. **NEW-TOPIC ROUTING IS HARD**: each new fact carries a source topic (来源主题) from L1 extraction. If a fact's source topic clearly does NOT match any existing scene, you MUST output it with action="create" as a brand-new scene. Do NOT force it into an existing scene just to avoid creating more scenes. Under-merging (more scenes) is safer than over-merging (polluting scenes with off-topic facts).
+3. If a fact's source topic matches an existing scene, use action="update" into that scene.
+4. If two existing scenes have become highly overlapping, combine them: use action="update" with the target scene as scene_name and list the other scene names in "merged_from" (they will be removed).
+5. Update scene summaries to reflect the new facts
+6. Only output scenes that were actually changed (new or modified)
 
 Output JSON array of affected scene blocks:
 ```json
@@ -65,16 +66,15 @@ Output JSON array of affected scene blocks:
     "summary": "updated 1-2 sentence summary",
     "added_fact_ids": [51, 52],
     "content": "The full updated scene content in markdown",
-    "note": "optional: reason for merge/split/create"
+    "merged_from": [],
+    "note": "optional: reason"
   }
 ]
 ```
 
 action values:
-- "update": merge new facts into an existing scene
-- "create": create a brand new scene
-- "merge": merge two+ scenes together (output one scene, note which names to remove)
-- "split": split a scene into multiple (output multiple scenes with same original name)
+- "update": merge new facts into an existing scene (scene_name = the existing scene). To fold other scenes into this one, list their names in "merged_from" — those scenes will be deleted.
+- "create": create a brand new scene for facts that match no existing scene.
 
 CRITICAL: ONLY output scenes that changed. Unchanged scenes should NOT appear in the output."""
 
@@ -82,13 +82,14 @@ INCREMENTAL_USER = """Here are the existing scene blocks:
 
 {existing_scenes_text}
 
-New facts to merge (not yet assigned to any scene):
+New facts to merge (not yet assigned to any scene). Each fact shows its source topic (来源主题) from L1 extraction:
 
 {new_facts_text}
 
 Merge these new facts into the existing scenes. Output ONLY the scenes that need to change.
-If a new fact fits in an existing scene, use action="update".
-If a new fact is about a new topic, use action="create".
+- If a fact's source topic matches an existing scene, use action="update" into that scene.
+- If a fact's source topic clearly does NOT match any existing scene, you MUST use action="create" and output a brand-new scene for it.
+- If a new fact is about a new topic, use action="create".
 Return ONLY the JSON array."""
 
 
@@ -143,6 +144,7 @@ class SceneExtractor:
         for scene_data in scenes:
             scene = L2Scene(
                 scene_name=scene_data.get("scene_name", ""),
+                summary=scene_data.get("summary", ""),
                 content_md=scene_data.get("content", ""),
                 fact_ids=scene_data.get("fact_ids", []),
             )
@@ -170,11 +172,13 @@ class SceneExtractor:
             # First run — do full consolidation
             return await self.consolidate()
 
-        # Format new facts
+        # Format new facts with their source topic (from L1 extraction)
         new_lines = []
         for f in new_facts:
+            topic = f.get("scene_name") or "unknown"
             new_lines.append(
                 f"- [id={f['fact_id']}] [{f.get('fact_type', '')}] {f['content']}"
+                f" (来源主题: {topic})"
             )
         new_facts_text = "\n".join(new_lines)
 
@@ -183,7 +187,7 @@ class SceneExtractor:
         for s in existing_scenes:
             scene_blocks.append(
                 f"### {s['scene_name']}\n"
-                f"**Summary**: {s.get('content_md', '')[:300]}\n"
+                f"**Summary**: {s.get('summary', '') or s.get('content_md', '')[:300]}\n"
                 f"**Fact count**: {s.get('fact_count', 0)}"
             )
         existing_text = "\n\n".join(scene_blocks)
@@ -204,48 +208,38 @@ class SceneExtractor:
             logger.debug("No scene changes from incremental L2")
             return []
 
-        # Apply changes
+        # Apply changes (actions: update / create; merging folds into update via merged_from)
         saved = []
         names_to_delete: set[str] = set()
         for scene_data in scenes:
             action = scene_data.get("action", "update")
             scene_name = scene_data.get("scene_name", "")
+            merged_from = scene_data.get("merged_from") or []
 
-            if action == "merge":
-                # Merge: record old names to delete later
-                old_names = scene_data.get("merged_from", [])
-                if isinstance(old_names, list):
-                    names_to_delete.update(old_names)
-
-            if not scene_name:
+            if action not in ("update", "create") or not scene_name:
                 continue
 
-            if action in ("update", "create", "merge"):
-                # Read existing fact_ids for updates
-                existing_ids = []
-                if action in ("update", "merge"):
-                    existing_content = self._l2.get_by_name(scene_name)
-                    if existing_content:
-                        # Extract fact_ids from frontmatter or previous state
-                        for entry in self._l2.get_all():
-                            if entry["scene_name"] == scene_name:
-                                existing_ids = entry.get("fact_ids", [])
-                                break
+            # All fact_ids this scene should own = added facts + (for update) the
+            # existing scene's facts and any scenes being folded into it
+            id_set = set(scene_data.get("added_fact_ids") or [])
+            if action == "update":
+                for name in [scene_name, *merged_from]:
+                    id_set.update(self._l2.get_fact_ids(name))
 
-                added_ids = scene_data.get("added_fact_ids", [])
-                all_ids = list(set(existing_ids + added_ids))
+            scene = L2Scene(
+                scene_name=scene_name,
+                summary=scene_data.get("summary", ""),
+                content_md=scene_data.get("content", ""),
+                fact_ids=sorted(id_set),
+            )
+            self._l2.upsert(scene)
+            saved.append(scene)
+            names_to_delete.update(merged_from)
 
-                scene = L2Scene(
-                    scene_name=scene_name,
-                    content_md=scene_data.get("content", ""),
-                    fact_ids=all_ids,
-                )
-                self._l2.upsert(scene)
-                saved.append(scene)
-
-        # Clean up merged scene files
+        # Remove scenes that were folded into another (unless re-created in this batch)
+        saved_names = {s.scene_name for s in saved}
         for name in names_to_delete:
-            if name not in {s.scene_name for s in saved}:
+            if name not in saved_names:
                 self._l2.delete_by_name(name)
 
         logger.info(

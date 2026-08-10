@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +13,12 @@ from typing import Any
 from .pg import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
+
+
+def content_hash(text: str) -> str:
+    """Normalized content hash for exact-duplicate detection."""
+    norm = re.sub(r"\s+", " ", (text or "").strip().casefold())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -186,6 +194,29 @@ class L1Repo:
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM memory_v3.l1_facts")
+                return cur.fetchone()[0]
+        finally:
+            put_connection(conn)
+
+    def content_hash_index(self) -> set[str]:
+        """Return hashes of all stored fact contents (for exact-dup detection)."""
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT content FROM memory_v3.l1_facts")
+                return {content_hash(row[0]) for row in cur.fetchall() if row[0]}
+        finally:
+            put_connection(conn)
+
+    def count_since(self, since: datetime) -> int:
+        """Count facts updated after a timestamp (for L2 data-volume trigger)."""
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM memory_v3.l1_facts WHERE updated_at > %s",
+                    (since,),
+                )
                 return cur.fetchone()[0]
         finally:
             put_connection(conn)

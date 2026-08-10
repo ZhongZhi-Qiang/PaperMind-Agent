@@ -36,19 +36,7 @@ CREATE INDEX IF NOT EXISTS ix_l1_facts_tsv
 -- CREATE INDEX IF NOT EXISTS ix_l1_facts_embedding_hnsw
 --     ON memory_v3.l1_facts USING hnsw (embedding vector_cosine_ops);
 
--- L2: Scene blocks
-CREATE TABLE IF NOT EXISTS memory_v3.l2_scenes (
-    scene_id    BIGSERIAL PRIMARY KEY,
-    scene_name  TEXT NOT NULL UNIQUE,
-    content_md  TEXT NOT NULL,
-    fact_ids    BIGINT[],
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    embedding   vector(1024)
-);
-
--- HNSW index for L2 scene search
--- CREATE INDEX IF NOT EXISTS ix_l2_scenes_embedding_hnsw
---     ON memory_v3.l2_scenes USING hnsw (embedding vector_cosine_ops);
+-- L2: Scene blocks (stored as local markdown files in memory_module_v3/scenes/, not in PostgreSQL)
 
 -- Pipeline state per session
 CREATE TABLE IF NOT EXISTS memory_v3.pipeline_state (
@@ -62,13 +50,6 @@ CREATE TABLE IF NOT EXISTS memory_v3.pipeline_state (
     last_l3_fact_count    INT DEFAULT 0,
     pending_l2            BOOLEAN DEFAULT FALSE,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- KV store for singletons (L3 persona, etc.)
-CREATE TABLE IF NOT EXISTS memory_v3.kv_store (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Cache index for similarity-based recall/embedding cache lookup (tier-2).

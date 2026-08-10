@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class L2Scene:
     scene_name: str = ""
+    summary: str = ""
     content_md: str = ""
     fact_ids: list[int] = field(default_factory=list)
     updated_at: datetime | None = None
@@ -49,6 +50,7 @@ class L2FileRepo:
         index = self._read_index()
         entry = {
             "scene_name": scene.scene_name,
+            "summary": (scene.summary or "").replace("\n", " ").strip(),
             "file": f"{scene.scene_name}.md",
             "fact_count": len(scene.fact_ids),
             "updated_at": now,
@@ -77,6 +79,20 @@ class L2FileRepo:
             return file_path.read_text(encoding="utf-8")
         return None
 
+    def get_fact_ids(self, scene_name: str) -> list[int]:
+        """Read fact_ids from a scene's markdown frontmatter."""
+        text = self.get_by_name(scene_name)
+        if not text:
+            return []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("fact_ids:"):
+                try:
+                    return [int(x) for x in json.loads(line[len("fact_ids:"):].strip())]
+                except (ValueError, TypeError):
+                    return []
+        return []
+
     def get_all_with_content(self) -> list[dict[str, Any]]:
         """Return all scenes with full content (for incremental L2 context)."""
         result = []
@@ -85,6 +101,7 @@ class L2FileRepo:
             content_md = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
             result.append({
                 "scene_name": entry["scene_name"],
+                "summary": entry.get("summary", ""),
                 "content_md": content_md,
                 "fact_count": entry.get("fact_count", 0),
             })
@@ -127,9 +144,11 @@ class L2FileRepo:
         """Format scene as markdown with YAML frontmatter."""
         now = scene.updated_at or datetime.now(timezone.utc)
         fact_ids_str = json.dumps(scene.fact_ids)
+        summary = (scene.summary or "").replace("\n", " ").strip()
         return (
             f"---\n"
             f"scene_name: {scene.scene_name}\n"
+            f"summary: {summary}\n"
             f"fact_ids: {fact_ids_str}\n"
             f"updated_at: {now.isoformat()}\n"
             f"---\n\n"

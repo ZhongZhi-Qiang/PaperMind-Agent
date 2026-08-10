@@ -49,14 +49,21 @@ class PipelineScheduler:
         state.warmup_threshold = min(state.warmup_threshold * 2, cfg.pipeline_every_n)
         logger.debug("Warmup threshold advanced to %d", state.warmup_threshold)
 
-    def should_run_l2(self, state: PipelineSessionState) -> bool:
+    def should_run_l2(self, state: PipelineSessionState, new_facts_since_l2: int | None = None) -> bool:
         """Check if L2 scene consolidation should run.
 
         Triggers:
-        1. pending_l2 flag set and delay after L1 elapsed
-        2. max interval since last L2 exceeded
+        1. Data-volume (primary): new_facts_since_l2 >= l2_trigger_n_facts
+        2. pending_l2 flag set and delay after L1 elapsed
+        3. max interval since last L2 exceeded
+        4. First run: no L2 ever, delay after L1 elapsed
         """
         cfg = self._cfg
+
+        # Data-volume trigger (primary): enough new facts since last L2
+        if state.last_l2_at and new_facts_since_l2 is not None and new_facts_since_l2 >= cfg.l2_trigger_n_facts:
+            logger.debug("L2 triggered by %d new facts >= %d", new_facts_since_l2, cfg.l2_trigger_n_facts)
+            return True
 
         if state.pending_l2 and state.last_l1_at:
             delay = timedelta(seconds=cfg.l2_delay_after_l1_seconds)
@@ -86,11 +93,14 @@ class PipelineScheduler:
     def should_run_l3(self, state: PipelineSessionState, total_facts: int) -> bool:
         """Check if L3 persona generation should run.
 
-        Triggers when total facts reach l3_trigger_every_n, then re-triggers
-        every l3_trigger_every_n new facts after the last L3 run.
+        Triggers:
+        1. Data-volume: total_facts - last_l3_fact_count >= l3_trigger_every_n
+        2. Max-interval fallback: refresh stale persona even on slow accumulation
+        3. First run: total_facts >= l3_trigger_every_n
         """
         cfg = self._cfg
-        if total_facts < cfg.l3_trigger_every_n:
-            return False
-        # Enough new facts since last L3
-        return total_facts - state.last_l3_fact_count >= cfg.l3_trigger_every_n
+        if total_facts - state.last_l3_fact_count >= cfg.l3_trigger_every_n:
+            return True
+        if state.last_l3_at and datetime.now(timezone.utc) >= state.last_l3_at + timedelta(seconds=cfg.l3_max_interval_seconds):
+            return True
+        return state.last_l3_at is None and total_facts >= cfg.l3_trigger_every_n

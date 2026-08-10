@@ -10,7 +10,7 @@ from typing import Any, Callable, Awaitable
 from ..config import MemoryV3Config, get_memory_v3_config
 from ..storage.l0_file_repo import L0FileRepo
 from ..storage.l1_repo import L1Repo
-from ..storage.l2_repo import PipelineStateRepo
+from ..storage.pipeline_repo import PipelineStateRepo
 from ..storage.l2_file_repo import L2FileRepo
 from ..storage.l3_file_repo import L3FileRepo
 from ..extract.l1_extractor import L1Extractor
@@ -45,6 +45,7 @@ class PipelineManager:
         embedding_fn: EmbeddingFn,
         config: MemoryV3Config | None = None,
         on_change: Callable[[], None] | None = None,
+        search_fn: Any | None = None,
     ):
         self._cfg = config or get_memory_v3_config()
         self._l0 = l0_repo
@@ -55,7 +56,7 @@ class PipelineManager:
         self._on_change = on_change
         self._scheduler = PipelineScheduler(self._cfg)
         self._extractor = L1Extractor(l0_repo, l1_repo, llm_fn)
-        self._dedup = L1Deduplicator(l1_repo, llm_fn)
+        self._dedup = L1Deduplicator(l1_repo, llm_fn, search_fn=search_fn)
 
         self._llm_fn = llm_fn
         self._embedding_fn = embedding_fn
@@ -161,8 +162,9 @@ class PipelineManager:
 
         logger.info("L1 complete: %d extracted, %d stored", len(facts), len(deduped))
 
-        # Check L2 trigger
-        if self._scheduler.should_run_l2(state):
+        # Check L2 trigger (data-volume primary, time fallback)
+        new_since = self._l1.count_since(state.last_l2_at) if state.last_l2_at else 0
+        if self._scheduler.should_run_l2(state, new_since):
             asyncio.create_task(self._run_l2_safe(session_id, state))
 
     async def _embed_l1_facts(self, facts: list) -> None:
@@ -195,13 +197,13 @@ class PipelineManager:
         # Query new facts since last L2 run
         if state.last_l2_at:
             new_facts = self._l1.get_since(state.last_l2_at)
+            if new_facts:
+                await extractor.consolidate_incremental(new_facts)
+            else:
+                logger.debug("No new facts since last L2, skipping consolidation")
         else:
-            new_facts = []
-
-        if new_facts:
-            await extractor.consolidate_incremental(new_facts)
-        else:
-            logger.debug("No new facts since last L2, skipping consolidation")
+            # First L2 run: full consolidation of all L1 facts
+            await extractor.consolidate()
 
         state.last_l2_at = datetime.now(timezone.utc)
         state.pending_l2 = False

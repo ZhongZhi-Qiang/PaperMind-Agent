@@ -41,7 +41,7 @@ class PersonaGenerator:
 
     async def generate(self) -> str | None:
         """Generate user persona from all scene blocks."""
-        scenes = self._l2.get_all()
+        scenes = self._l2.get_all_with_content()
         if not scenes:
             logger.debug("No scenes available for persona generation")
             return None

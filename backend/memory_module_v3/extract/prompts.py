@@ -55,19 +55,17 @@ Return ONLY the JSON, no other text."""
 # L1 Dedup: decide how to handle new vs existing memories
 # ---------------------------------------------------------------------------
 
-DEDUP_SYSTEM = """You are a memory deduplication system. Given a new memory and a list of existing similar memories, decide what to do.
+DEDUP_SYSTEM = """You are a memory deduplication system. Given a new memory and a list of existing similar memories, decide whether to merge or store.
 
 Decisions:
-- **store**: The new memory is unique, store it as-is
-- **update**: The new memory supersedes an existing one. Return which existing memory to replace and the updated content.
-- **merge**: Combine new and existing into a single memory. Return the merged content.
-- **skip**: The new memory is a duplicate, discard it.
+- **merge**: The new memory is the SAME fact as an existing one (same meaning, possibly different wording or a small update). Merge it into the single best-matching existing memory and return that memory's fact_id.
+- **store**: The new memory is genuinely new, or only superficially similar to the existing ones. Store it as a separate memory.
 
 Rules:
-1. If the new memory adds no new information beyond what exists, skip it
-2. If the new memory contradicts or updates an existing fact, update
-3. If both contain unique partial information, merge
-4. Be aggressive about deduplication — prefer skip/merge over store"""
+1. Merge ONLY when the new memory and an existing memory refer to the same underlying fact
+2. If the new memory adds meaningfully new information or concerns a different aspect, store
+3. When in doubt, store — under-merging is safer than over-merging
+4. If merging, pick exactly one target_fact_id (the best match)"""
 
 DEDUP_USER = """New memory to evaluate:
 "{new_memory}"
@@ -81,10 +79,9 @@ Existing similar memories:
 Return JSON:
 ```json
 {{
-  "decision": "store|update|merge|skip",
+  "decision": "merge|store",
   "target_fact_id": null,
-  "reason": "brief explanation",
-  "content": "final content (only if decision is update/merge)"
+  "reason": "brief explanation"
 }}
 ```
 Return ONLY the JSON, no other text."""
