@@ -10,6 +10,7 @@ import logging
 from config import get_settings
 from graph.context import RequestContext
 from graph.agent_factory import build_agent_config, create_agent_from_config
+from graph.harness_review import persist_review, review_conversation
 from service.session_manager import SessionManager
 from tools import get_all_tools
 from memory_module_v3.config import get_memory_backend
@@ -24,6 +25,14 @@ _v3_offload = None
 _v3_services: dict[str, Any] = {}
 
 logger = logging.getLogger(__name__)
+
+
+# Knowledge-acquiring tools whose calls constitute "evidence" for an answer.
+# Their invocations are collected and surfaced to the frontend as answer sources.
+_KNOWLEDGE_TOOLS = {
+    "query_wiki", "read_wiki_page", "list_wiki_pages", "list_source_files",
+    "search_memory_v3", "read_file", "fetch_url",
+}
 
 
 def _stringify_content(content: Any) -> str:
@@ -140,6 +149,7 @@ class AgentManager:
         last_ai_message = ""
         pending_tools: dict[str, dict[str, str]] = {}
         last_usage: dict[str, Any] | None = None
+        evidence_sources: list[dict[str, str]] = []
 
         async for mode, payload in agent.astream(
             {"messages": turn_messages},
@@ -223,18 +233,30 @@ class AgentManager:
                         }
                         yield {"type": "new_response"}
 
+                        # Collect knowledge-acquiring tool calls as answer evidence
+                        if pending["tool"] in _KNOWLEDGE_TOOLS and output:
+                            evidence_sources.append({
+                                "tool": pending["tool"],
+                                "query": (pending["input"] or "")[:120],
+                                "hit": output[:200],
+                            })
+
         final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
 
-        # --- v3 auto-capture (fire-and-forget: don't block `done` event) ---
+        # --- v3 auto-capture + harness review (post-turn, fire-and-forget) ---
+        # Review and memory capture are orchestrated together in one background task so they
+        # run serially: review first, then capture. The review result gates high-risk replies
+        # out of the retrievable memory layers (L1-L3). Both happen after `done` is yielded,
+        # so perceived latency is unchanged.
         if memory_backend == "v3" and _v3_recorder and _v3_pipeline:
+            post_turn_coro = _post_turn_review_and_capture(
+                agent, run_config, session_id, message, final_content,
+            )
             if settings.memory_v3_async_capture:
-                _spawn_background_task(_v3_capture_async(session_id, message, final_content))
+                _spawn_background_task(post_turn_coro)
             else:
                 try:
-                    user_id, asst_id = await _v3_recorder.capture(
-                        session_id, message, final_content,
-                    )
-                    await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
+                    await post_turn_coro
                 except Exception as v3_cap_exc:
                     logger.warning("Memory v3 auto-capture failed: %s", v3_cap_exc)
         # 若 LLM 返回了 usage，且本次调用启用了 Langfuse，则在结束时补充 usage 信息，方便在 Langfuse 中显示 tokens
@@ -268,6 +290,8 @@ class AgentManager:
             (_t3 - (_t2 or _t1 or _t0)) * 1000,
             (_t3 - _t0) * 1000,
         )
+        if evidence_sources:
+            yield {"type": "evidence", "sources": evidence_sources}
         yield {"type": "done", "content": final_content}
 
     async def generate_title(self, first_user_message: str) -> str:
@@ -320,15 +344,59 @@ agent_manager = AgentManager()
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
-async def _v3_capture_async(session_id: str, message: str, final_content: str) -> None:
-    """Background auto-capture: writes this turn to long-term memory without blocking the SSE `done`."""
+async def _post_turn_review_and_capture(
+    agent: Any,
+    run_config: dict[str, Any],
+    session_id: str,
+    message: str,
+    final_content: str,
+) -> None:
+    """Post-turn background task: review → persist review → capture memory.
+
+    Runs after the SSE `done` event is yielded, so it never adds perceived latency.
+    Review runs first (single LLM call, see ``harness_review.review_conversation``);
+    the result is persisted to ``reviews/{session_id}.jsonl`` and used to gate whether
+    the assistant reply is allowed into the retrievable memory layers:
+
+    - ``hallucination_risk == "high"`` → only the user message is distilled. L0 keeps
+      the raw reply for audit, but it doesn't enter L1-L3.
+    - otherwise → both messages distill as before.
+
+    Review failure/timeout → review=None → capture as usual (fail-open, matching the
+    "宁存重复不丢事实" philosophy).
+    """
     if not _v3_recorder or not _v3_pipeline:
         return
+
+    review = None
+    try:
+        settings = get_settings()
+        if settings.harness_review_enabled:
+            state = await agent.aget_state(run_config)
+            messages = (state.values or {}).get("messages", [])
+            if messages:
+                review = await asyncio.wait_for(
+                    review_conversation(messages),
+                    timeout=settings.harness_review_timeout_ms / 1000,
+                )
+                if review:
+                    reviews_dir = settings.backend_dir / "reviews"
+                    persist_review(reviews_dir, session_id, review, final_content)
+    except Exception as exc:
+        logger.warning("Post-turn review failed (capture continues): %s", exc)
+        review = None
+
     try:
         user_id, asst_id = await _v3_recorder.capture(session_id, message, final_content)
-        await _v3_pipeline.notify_conversation(session_id, [user_id, asst_id])
+        block_assistant = (
+            review is not None
+            and review.get("hallucination_risk") == "high"
+            and getattr(get_settings(), "harness_review_block_memory", True)
+        )
+        msg_ids = [user_id] if block_assistant else [user_id, asst_id]
+        await _v3_pipeline.notify_conversation(session_id, msg_ids)
     except Exception as exc:
-        logger.warning("Memory v3 async auto-capture failed: %s", exc)
+        logger.warning("Memory v3 auto-capture failed: %s", exc)
 
 
 def _spawn_background_task(coro: Any) -> asyncio.Task:

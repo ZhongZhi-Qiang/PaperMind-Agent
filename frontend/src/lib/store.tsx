@@ -17,6 +17,7 @@ import {
   setRagMode,
   streamChat,
   streamIngest,
+  type EvidenceSource,
   type RetrievalResult,
   type SessionSummary,
   type ToolCall
@@ -28,6 +29,7 @@ type Message = {
   content: string;
   toolCalls: ToolCall[];
   retrievals: RetrievalResult[];
+  sources: EvidenceSource[];
 };
 
 type TokenStats = {
@@ -84,7 +86,8 @@ function toUiMessages(history: Awaited<ReturnType<typeof getSessionHistory>>["me
     role: message.role,
     content: message.content ?? "",
     toolCalls: message.tool_calls ?? [],
-    retrievals: []
+    retrievals: [],
+    sources: []
   }));
 }
 
@@ -166,6 +169,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         content: "",
         toolCalls: [],
         retrievals: [],
+        sources: []
       };
       setMessages((prev) => [...prev, ingestMessage]);
       const ingestId = ingestMessage.id;
@@ -227,14 +231,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       role: "user",
       content: messageContent,
       toolCalls: [],
-      retrievals: []
+      retrievals: [],
+      sources: []
     };
     const assistantMessage: Message = {
       id: makeId(),
       role: "assistant",
       content: "",
       toolCalls: [],
-      retrievals: []
+      retrievals: [],
+      sources: []
     };
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -257,6 +263,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
               patchAssistant((message) => ({
                 ...message,
                 retrievals: (data.results as RetrievalResult[]) ?? []
+              }));
+              return;
+            }
+
+            if (event === "evidence") {
+              patchAssistant((message) => ({
+                ...message,
+                sources: (data.sources as EvidenceSource[]) ?? []
               }));
               return;
             }
@@ -308,7 +322,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 role: "assistant",
                 content: "",
                 toolCalls: [],
-                retrievals: []
+                retrievals: [],
+                sources: []
               };
               activeAssistantId = nextAssistant.id;
               setMessages((prev) => [...prev, nextAssistant]);

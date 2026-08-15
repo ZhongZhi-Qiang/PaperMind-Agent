@@ -45,11 +45,12 @@ def test_long_message_goes_l2():
 
 
 def test_tool_whitelist():
-    assert "ReadFile" in L1_READONLY_TOOLS
-    assert "FetchURL" in L1_READONLY_TOOLS
+    # Tools are registered by snake_case name (not CamelCase class name)
+    assert "read_file" in L1_READONLY_TOOLS
+    assert "fetch_url" in L1_READONLY_TOOLS
     assert "search_memory_v3" in L1_READONLY_TOOLS
-    assert "Terminal" not in L1_READONLY_TOOLS
-    assert "PythonRepl" not in L1_READONLY_TOOLS
+    assert "terminal" not in L1_READONLY_TOOLS
+    assert "python_repl" not in L1_READONLY_TOOLS
 
 
 if __name__ == "__main__":

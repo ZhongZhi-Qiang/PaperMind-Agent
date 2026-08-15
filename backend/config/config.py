@@ -108,6 +108,9 @@ class Settings:
     harness_pruning_enabled: bool = True
     harness_review_min_response_chars: int = 50
     harness_review_sync: bool = False
+    # Review → memory guard: block high-risky assistant replies from entering L1-L3
+    harness_review_block_memory: bool = True
+    harness_review_timeout_ms: int = 8000
     # Parallel tool calls
     parallel_tool_calls_enabled: bool = True
     # MinerU document parser
@@ -318,6 +321,8 @@ def get_settings() -> Settings:
         harness_pruning_enabled=_env_bool("HARNESS_PRUNING_ENABLED", True),
         harness_review_min_response_chars=_env_int("HARNESS_REVIEW_MIN_RESPONSE_CHARS", 50),
         harness_review_sync=_env_bool("HARNESS_REVIEW_SYNC", False),
+        harness_review_block_memory=_env_bool("HARNESS_REVIEW_BLOCK_MEMORY", True),
+        harness_review_timeout_ms=_env_int("HARNESS_REVIEW_TIMEOUT_MS", 8000),
         # Parallel tool calls
         parallel_tool_calls_enabled=_env_bool("PARALLEL_TOOL_CALLS_ENABLED", True),
         # MinerU document parser

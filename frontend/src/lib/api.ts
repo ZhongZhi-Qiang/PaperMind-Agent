@@ -10,6 +10,12 @@ export type RetrievalResult = {
   source: string;
 };
 
+export type EvidenceSource = {
+  tool: string;
+  query: string;
+  hit: string;
+};
+
 export type SessionSummary = {
   id: string;
   title: string;

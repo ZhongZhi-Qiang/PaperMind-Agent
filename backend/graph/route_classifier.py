@@ -49,7 +49,10 @@ L2_PATTERNS: tuple[str, ...] = (
     "生成", "generate", "汇总",
     "终端", "terminal", "bash", "command",
     "python", "写代码", "write code",
-    "register source", "save wiki", "wiki整理", "wiki创建",
+    # Analysis / comparison (multi-step, tool-requiring)
+    "analyze", "analyse", "分析",
+    "compare", "comparison", "对比", "比较",
+    "注册", "register source", "save wiki", "wiki整理", "wiki创建",
     "解析pdf", "parse pdf", "解析论文",
     "安装", "install", "部署", "deploy",
     "复现", "reproduce", "实现", "implement",

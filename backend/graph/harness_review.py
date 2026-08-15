@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from langchain.agents.middleware import AgentMiddleware
@@ -271,13 +273,62 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
             result = await asyncio.to_thread(self._do_review, state)
             return {"harness_review": result} if result else None
 
-        # Default: fire-and-forget — don't block the `done` event on review LLM call.
-        # Review result is logged but no longer written back to agent state (it was not consumed
-        # downstream anyway). This shaves one full LLM round-trip off perceived latency.
-        asyncio.create_task(asyncio.to_thread(self._do_review, state))
+        # Review is orchestrated by AgentManager's post-turn task
+        # (`_post_turn_review_and_capture` in agent.py): it runs exactly once, serially
+        # with memory capture, and persists to reviews/{session_id}.jsonl. Keeping it here
+        # fire-and-forget would race with capture (no ordering guarantee) and duplicate the
+        # LLM call. AgentManager also reads the result to gate high-risk replies out of memory.
         return None
 
 
 def build_harness_review_middleware(llm: Any = None) -> HarnessReviewMiddleware:
     """Factory for HarnessReviewMiddleware."""
     return HarnessReviewMiddleware(llm=llm)
+
+
+# ─── Post-turn orchestration helpers (used by AgentManager) ────────────────
+
+_review_middleware: HarnessReviewMiddleware | None = None
+
+
+async def review_conversation(messages: list) -> dict[str, Any] | None:
+    """Run a conversation quality review. Single review entry point.
+
+    Wraps ``HarnessReviewMiddleware._do_review`` (which already handles the
+    ``harness_review_enabled`` switch, short-response pruning, and JSON parsing)
+    in a thread so it doesn't block the event loop.
+    """
+    global _review_middleware
+    if _review_middleware is None:
+        _review_middleware = HarnessReviewMiddleware()
+    state: dict[str, Any] = {"messages": messages}
+    return await asyncio.to_thread(_review_middleware._do_review, state)
+
+
+def persist_review(
+    reviews_dir: str | Path,
+    session_id: str,
+    review: dict[str, Any],
+    assistant_excerpt: str = "",
+) -> None:
+    """Append a review record to ``reviews/{session_id}.jsonl`` (append-only audit log).
+
+    Keeps the review decoupled from L0/session files: reviews are post-hoc audit data,
+    not memory material. ``assistant_excerpt`` is a short slice of the assistant reply
+    so a record can be traced back to the turn it reviewed.
+    """
+    path = Path(reviews_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    safe_id = (session_id or "default").replace("/", "_").replace("\\", "_")
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "quality_score": review.get("quality_score"),
+        "hallucination_risk": review.get("hallucination_risk"),
+        "issues": review.get("issues"),
+        "tool_audit": review.get("tool_audit"),
+        "summary": review.get("summary"),
+        "assistant_excerpt": (assistant_excerpt or "")[:200],
+    }
+    with open(path / f"{safe_id}.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")

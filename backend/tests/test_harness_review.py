@@ -50,6 +50,7 @@ class TestHarnessReviewMiddleware:
         middleware = HarnessReviewMiddleware()
         mock_settings = MagicMock()
         mock_settings.harness_review_enabled = True
+        mock_settings.harness_pruning_enabled = False
         with patch("config.get_settings", return_value=mock_settings):
             state = {"messages": [MagicMock()]}
             result = middleware._do_review(state)
@@ -59,6 +60,7 @@ class TestHarnessReviewMiddleware:
         middleware = HarnessReviewMiddleware()
         mock_settings = MagicMock()
         mock_settings.harness_review_enabled = True
+        mock_settings.harness_pruning_enabled = False
         with patch("config.get_settings", return_value=mock_settings):
             state = {"messages": []}
             result = middleware._do_review(state)
@@ -81,6 +83,7 @@ class TestHarnessReviewMiddleware:
         middleware = HarnessReviewMiddleware(llm=mock_llm)
         mock_settings = MagicMock()
         mock_settings.harness_review_enabled = True
+        mock_settings.harness_pruning_enabled = False
 
         msg1 = MagicMock()
         msg1.type = "user"
@@ -107,6 +110,7 @@ class TestHarnessReviewMiddleware:
         middleware = HarnessReviewMiddleware(llm=mock_llm)
         mock_settings = MagicMock()
         mock_settings.harness_review_enabled = True
+        mock_settings.harness_pruning_enabled = False
 
         msg1 = MagicMock()
         msg1.type = "user"

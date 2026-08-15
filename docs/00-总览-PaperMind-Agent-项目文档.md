@@ -678,9 +678,9 @@ before_model → L3: 渐进式压缩 (按 score)
 
 **关键设计：** 摘要仅在对话历史中生效，不影响 session JSON 文件。原始对话通过 `SessionManager` 持久化为 `sessions/*.json` 文件（append-only），长期记忆系统独立从中蒸馏。
 
-### 4.6 HarnessReview：质量审查
+### 4.6 HarnessReview：质量审查（闭环）
 
-**执行时机：** `after_agent`，Agent 完成后。
+**执行时机：** Agent 完成后。`after_agent` 的审查逻辑抽离为 `review_conversation()`，由 `AgentManager` 在 `done` 事件后的后台收尾任务统一编排，与记忆捕获串行执行（用户感知延迟为零）。
 
 将完整对话发给 LLM 做四维评估：
 
@@ -697,15 +697,37 @@ before_model → L3: 渐进式压缩 (按 score)
 }
 ```
 
-结果存入 session metadata，可被外部监控系统（如 Langfuse）聚合分析。
+**闭环机制（审查结果不再只打日志，而是两个实际消费点）：**
 
-### 4.7 安全测试覆盖
+1. **记录保存**：`persist_review()` 将每轮审查结果追加到 `reviews/{session_id}.jsonl`（append-only 审计日志，含质量分、幻觉风险、问题列表、工具审计、回复摘录），可被外部监控系统（如 Langfuse）聚合分析。
+2. **记忆门控**：当 `hallucination_risk == "high"` 时，该轮 **assistant 回复被挡在可检索记忆层（L1-L3）之外**——L0 原文仍保留（可审计），用户消息仍正常沉淀。由 `HARNESS_REVIEW_BLOCK_MEMORY` 开关控制；`HARNESS_REVIEW_TIMEOUT_MS` 控制 review 等待超时，超时/失败 fail-open 照常捕获（呼应"宁存重复不丢事实"）。
 
-安全约束通过 **48 项测试**，覆盖：
+### 4.7 输出依据与证据（Evidence）
+
+**目标：** 让"回答有依据"从 prompt 软约束变成可见的结构化数据，支持审计与追溯。
+
+`agent.py` 在 `astream()` 中收集**知识型工具调用**（`_KNOWLEDGE_TOOLS`：`query_wiki` / `read_wiki_page` / `list_wiki_pages` / `list_source_files` / `search_memory_v3` / `read_file` / `fetch_url`）作为回答证据，在 `done` 事件前通过 SSE 的 `evidence` 事件输出：
+
+```json
+{
+  "type": "evidence",
+  "sources": [
+    {"tool": "query_wiki", "query": "注意力机制", "hit": "…检索结果摘要…"},
+    {"tool": "read_wiki_page", "query": "wiki/concepts/self-attention.md", "hit": "…页面内容摘要…"}
+  ]
+}
+```
+
+前端将 `sources` 渲染为"回答依据"折叠卡片（工具类型 + 查询参数 + 命中摘要），与"检索到 Memory 片段"卡片（`retrieval` 事件）互补：`retrieval` 展示召回的记忆，`evidence` 展示回答实际依赖的工具依据。
+
+### 4.8 安全与质量测试覆盖
+
+后端测试套件通过 **91 项测试**（`cd backend && python -m pytest`），覆盖：
 - 提示词注入拦截（4 类攻击模式）
 - 敏感文件保护（glob 模式匹配：`.env`, `*.key`, `.ssh/*` 等）
 - 危险命令拦截（`rm -rf`, `DROP TABLE`, `/dev/sd*` 等）
 - 自定义规则验证（YAML 热加载 + 生效验证）
+- 记忆管线数据一致性（L0 文件存储、L1 去重 merge、L2 增量场景合并、Offload L3 压缩）
 
 ---
 
@@ -914,6 +936,15 @@ skills/
 | `SUMMARIZATION_ENABLED` | `false` | 启用对话压缩 |
 | `SUMMARIZATION_TRIGGER_MESSAGES` | `50` | 触发压缩的消息数 |
 | `SUMMARIZATION_KEEP_MESSAGES` | `20` | 压缩后保留的消息数 |
+
+**Harness 审查：**
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `HARNESS_REVIEW_ENABLED` | `true` | 是否启用质量审查 |
+| `HARNESS_REVIEW_SYNC` | `false` | 同步模式（调试用，阻塞 `done` 事件） |
+| `HARNESS_REVIEW_BLOCK_MEMORY` | `true` | 高风险幻觉回答是否阻断进可检索记忆层 |
+| `HARNESS_REVIEW_TIMEOUT_MS` | `8000` | review 等待超时（毫秒），超时 fail-open |
 
 **arXiv 消化：**
 

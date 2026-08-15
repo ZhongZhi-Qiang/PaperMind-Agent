@@ -4,19 +4,22 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { RetrievalCard } from "@/components/chat/RetrievalCard";
+import { SourcesCard } from "@/components/chat/SourcesCard";
 import { ThoughtChain } from "@/components/chat/ThoughtChain";
-import type { RetrievalResult, ToolCall } from "@/lib/api";
+import type { EvidenceSource, RetrievalResult, ToolCall } from "@/lib/api";
 
 export function ChatMessage({
   role,
   content,
   toolCalls,
-  retrievals
+  retrievals,
+  sources
 }: {
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
   retrievals: RetrievalResult[];
+  sources: EvidenceSource[];
 }) {
   const isUser = role === "user";
 
@@ -45,6 +48,7 @@ export function ChatMessage({
       }`}
     >
       {!isUser && <RetrievalCard results={retrievals} />}
+      {!isUser && <SourcesCard sources={sources} />}
       {!isUser && <ThoughtChain toolCalls={toolCalls} />}
       {!isPureToolOutput && displayContent && displayContent.trim() !== "" && (
         <div className={isUser ? "whitespace-pre-wrap leading-7" : "markdown"}>
