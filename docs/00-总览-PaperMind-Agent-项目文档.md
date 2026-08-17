@@ -729,6 +729,25 @@ before_model → L3: 渐进式压缩 (按 score)
 - 自定义规则验证（YAML 热加载 + 生效验证）
 - 记忆管线数据一致性（L0 文件存储、L1 去重 merge、L2 增量场景合并、Offload L3 压缩）
 
+### 4.9 可观测性：Langfuse 监控
+
+**接入：** `graph/context.py` 初始化 `LangfuseCallbackHandler`，`build_request_context()` 默认在每次 `/api/chat` 请求中启用。`.env` 配置 `LANGFUSE_SECRET_KEY` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` 后即可生效（self-hosted 或 Langfuse Cloud 均可）。
+
+**监控覆盖矩阵：**
+
+| 环节 | 是否入 trace | 方式 |
+|------|-------------|------|
+| Agent 主 LLM（ReAct 循环） | ✅ | `LangfuseCallbackHandler` 自动捕获为 generation |
+| 工具调用（wiki/memory/terminal 等） | ✅ | 同上，捕获为 tool observation |
+| Tokens / 用量 | ✅ | v4 handler 在 `on_llm_end` 自动解析 usage |
+| Guardian 安全分类 | ✅ | `_request_guardian_decision` 通过 `langgraph.config.get_config()` 携带 callbacks，作为子 observation |
+| HarnessReview 质量审查 | ✅ | 后台任务，独立 trace，经 `langfuse_session_id` + `parent_trace_id` 与原会话关联 |
+| 记忆 recall embedding | ❌（已知限制） | Langfuse handler 不支持 embedding 捕获；以 `recall_ms` 等 metadata 补偿 |
+
+**Trace metadata：** 每次请求的 `run_config` 注入 `langfuse_session_id`（会话关联）、`langfuse_trace_name`（`agent_turn`）、`query`（用户消息截断）、`memory_backend`、`recall_ms`（记忆召回耗时），Langfuse UI 中可直接按这些字段筛选。
+
+**已知限制：** 记忆 recall 的 embedding 调用不产生独立 span；HarnessReview 是 `done` 事件后的关联独立 trace（而非子 span），因原 trace 的 root span 在 `done` 时已结束。
+
 ---
 
 ## 五、知识熵管理机制

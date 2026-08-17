@@ -47,6 +47,29 @@ def _stringify_content(content: Any) -> str:
     return str(content or "")
 
 
+def _dangling_tool_call_ids(messages: list) -> list[str]:
+    """Return tool_call_ids that an AI message declared but no ToolMessage ever responded to.
+
+    When the agent is interrupted mid-tool-execution (e.g. a tool-call limit or a crash in the
+    tools node), the checkpoint may hold an AIMessage with tool_calls but no matching ToolMessage.
+    Feeding that incomplete sequence back to the LLM raises a 400 (insufficient tool messages),
+    so resume must "cancel" those dangling calls before continuing.
+    """
+    responded: set[str] = set()
+    declared: set[str] = set()
+    for m in messages:
+        mtype = getattr(m, "type", "")
+        if mtype == "tool":
+            cid = str(getattr(m, "tool_call_id", "") or "")
+            if cid:
+                responded.add(cid)
+        for tc in (getattr(m, "tool_calls", None) or []):
+            cid = str(tc.get("id", "")) if isinstance(tc, dict) else str(getattr(tc, "id", "") or "")
+            if cid:
+                declared.add(cid)
+    return sorted(declared - responded)
+
+
 class AgentManager:
     def __init__(self) -> None:
         self.base_dir: Path | None = None
@@ -85,6 +108,8 @@ class AgentManager:
         message: str,
         history: list[dict[str, Any]],
         context: RequestContext | None = None,
+        *,
+        resume: bool = False,
     ):
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
@@ -99,8 +124,8 @@ class AgentManager:
         turn_messages: list[dict[str, str]] = []
         session_id = context.thread_id if context else "default"
 
-        # --- v3 auto-recall ---
-        if memory_backend == "v3":
+        # --- v3 auto-recall (skipped on resume: no new query to recall against) ---
+        if not resume and memory_backend == "v3":
             await _init_v3_once()
             # Register v3 tools if not already present (init may have completed after initialize())
             if _v3_recall_service and not any(t.name == "search_memory_v3" for t in self.tools):
@@ -136,7 +161,8 @@ class AgentManager:
                 session_id, (_t1 - _t0) * 1000,
             )
 
-        turn_messages.append({"role": "user", "content": message})
+        if not resume:
+            turn_messages.append({"role": "user", "content": message})
 
         agent = self._build_agent()
         run_config: dict[str, Any] = {"configurable": {"thread_id": (context.thread_id if context else "")}}
@@ -144,27 +170,55 @@ class AgentManager:
             run_config["callbacks"] = context.callbacks
         if not run_config["configurable"]["thread_id"]:
             run_config["configurable"]["thread_id"] = "default"
+        # Langfuse trace metadata: LangfuseCallbackHandler promotes `langfuse_*` keys to
+        # trace attributes (session/name), the rest lands in the trace's metadata dict.
+        run_config["metadata"] = {
+            "langfuse_session_id": session_id,
+            "langfuse_trace_name": "agent_turn",
+            "query": (message or "")[:300],
+            "memory_backend": memory_backend,
+            "recall_ms": round((_t1 - _t0) * 1000, 1) if _t1 else None,
+        }
+        # Hard step cap so a looping agent fails loudly instead of burning tokens.
+        run_config["recursion_limit"] = 40
 
         final_content_parts: list[str] = []
         last_ai_message = ""
         pending_tools: dict[str, dict[str, str]] = {}
-        last_usage: dict[str, Any] | None = None
         evidence_sources: list[dict[str, str]] = []
 
+        # resume=True → no new input: LangGraph continues from the last checkpoint.
+        # If the interrupt happened mid-tool-execution, the checkpoint holds dangling tool_calls
+        # (AI declared but no ToolMessage responded). Feeding them back to the LLM raises 400,
+        # so "cancel" them first so the model can continue from the tool results it does have.
+        if resume:
+            try:
+                state = await agent.aget_state(run_config)
+                stored = (state.values or {}).get("messages", [])
+                dangling = _dangling_tool_call_ids(stored)
+                if dangling:
+                    from langchain_core.messages import ToolMessage
+
+                    cancels = [
+                        ToolMessage(
+                            content="[中断] 该工具调用未执行完成。请基于已有信息直接回答或继续。",
+                            tool_call_id=cid,
+                        )
+                        for cid in dangling
+                    ]
+                    await agent.aupdate_state(run_config, {"messages": cancels}, as_node="model")
+                    logger.debug("resume: cancelled dangling tool_calls %s", dangling)
+            except Exception as exc:
+                logger.debug("resume pre-cleanup skipped: %s", exc)
+
+        agent_input: dict[str, Any] | None = None if resume else {"messages": turn_messages}
         async for mode, payload in agent.astream(
-            {"messages": turn_messages},
+            agent_input,
             stream_mode=["messages", "updates"],
             config=run_config,
-            # stream_options={"include_usage": True}
         ):
             if mode == "messages":
                 chunk, metadata = payload
-                # 优先从 metadata 中读取 usage（LangGraph 在 include_usage=True 时会放在这里）
-                usage_candidate: Any = None
-                if isinstance(metadata, dict):
-                    usage_candidate = metadata.get("usage")
-                if isinstance(usage_candidate, dict):
-                    last_usage = usage_candidate
 
                 # 只转发有实际文本内容的 AI token，跳过 tool 消息（tool 结果走 tool_end 事件）
                 if mode == "messages":
@@ -251,6 +305,7 @@ class AgentManager:
         if memory_backend == "v3" and _v3_recorder and _v3_pipeline:
             post_turn_coro = _post_turn_review_and_capture(
                 agent, run_config, session_id, message, final_content,
+                callbacks=context.callbacks if context else None,
             )
             if settings.memory_v3_async_capture:
                 _spawn_background_task(post_turn_coro)
@@ -259,30 +314,6 @@ class AgentManager:
                     await post_turn_coro
                 except Exception as v3_cap_exc:
                     logger.warning("Memory v3 auto-capture failed: %s", v3_cap_exc)
-        # 若 LLM 返回了 usage，且本次调用启用了 Langfuse，则在结束时补充 usage 信息，方便在 Langfuse 中显示 tokens
-        if last_usage and context and context.callbacks:
-            try:
-                from langfuse import get_client
-                from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
-
-                langfuse_handler: Any | None = None
-                for cb in context.callbacks:
-                    if isinstance(cb, LangfuseCallbackHandler):
-                        langfuse_handler = cb
-                        break
-                trace_id = getattr(langfuse_handler, "last_trace_id", None) if langfuse_handler else None
-                if trace_id:
-                    client = get_client()
-                    client.trace.update(
-                        id=trace_id,
-                        usage={
-                            "input": last_usage.get("prompt_tokens", 0),
-                            "output": last_usage.get("completion_tokens", 0),
-                            "total": last_usage.get("total_tokens", 0),
-                        },
-                    )
-            except Exception as exc:
-                print("[langfuse] 更新 usage 失败：", repr(exc))
         _t3 = _time.perf_counter()
         logger.info(
             "latency session=%s done_ms=%.0f total_ms=%.0f",
@@ -350,6 +381,7 @@ async def _post_turn_review_and_capture(
     session_id: str,
     message: str,
     final_content: str,
+    callbacks: list | None = None,
 ) -> None:
     """Post-turn background task: review → persist review → capture memory.
 
@@ -364,6 +396,9 @@ async def _post_turn_review_and_capture(
 
     Review failure/timeout → review=None → capture as usual (fail-open, matching the
     "宁存重复不丢事实" philosophy).
+
+    ``callbacks`` are the request-scoped LangChain callbacks (incl. the Langfuse handler)
+    from the original turn; used to link the review trace back to the agent trace.
     """
     if not _v3_recorder or not _v3_pipeline:
         return
@@ -375,8 +410,17 @@ async def _post_turn_review_and_capture(
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", [])
             if messages:
+                # Langfuse: review runs after the agent trace is closed, so it becomes
+                # its own trace linked back via session_id + parent_trace_id in metadata.
+                review_callbacks, review_metadata = _build_review_trace_context(
+                    session_id, callbacks,
+                )
                 review = await asyncio.wait_for(
-                    review_conversation(messages),
+                    review_conversation(
+                        messages,
+                        callbacks=review_callbacks,
+                        metadata=review_metadata,
+                    ),
                     timeout=settings.harness_review_timeout_ms / 1000,
                 )
                 if review:
@@ -405,6 +449,44 @@ def _spawn_background_task(coro: Any) -> asyncio.Task:
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
     return task
+
+
+def _build_review_trace_context(
+    session_id: str,
+    callbacks: list | None,
+) -> tuple[list | None, dict[str, Any]]:
+    """Build callbacks + metadata for the post-turn HarnessReview Langfuse trace.
+
+    Review runs after the agent trace has closed, so it gets its own Langfuse trace,
+    linked back to the original agent trace via ``langfuse_session_id`` (session-level
+    association) and ``parent_trace_id`` (the original handler's last trace id) in
+    metadata. Returns ``(None, {})`` when Langfuse isn't configured — review proceeds
+    untraced without affecting behavior.
+    """
+    try:
+        from graph.context import build_langfuse_callbacks
+        from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+
+        review_callbacks = build_langfuse_callbacks()
+        if not review_callbacks:
+            return None, {}
+
+        parent_trace_id = None
+        for cb in (callbacks or []):
+            if isinstance(cb, LangfuseCallbackHandler):
+                parent_trace_id = getattr(cb, "last_trace_id", None)
+                break
+
+        metadata: dict[str, Any] = {
+            "langfuse_session_id": session_id,
+            "langfuse_trace_name": "harness_review",
+        }
+        if parent_trace_id:
+            metadata["parent_trace_id"] = parent_trace_id
+        return review_callbacks, metadata
+    except Exception as exc:
+        logger.debug("Langfuse review trace context unavailable: %s", exc)
+        return None, {}
 
 
 async def _init_v3_once():

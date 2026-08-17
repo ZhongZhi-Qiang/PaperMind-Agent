@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware import (
+    ModelRetryMiddleware,
+    SummarizationMiddleware,
+    ToolCallLimitMiddleware,
+)
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
@@ -105,6 +109,8 @@ class AgentConfig:
     offload_config: dict = field(default_factory=dict)
     harness_security_enabled: bool = True
     harness_review_enabled: bool = True
+    # Main-chain resilience guards: LLM auto-retry + tool-call limit (anti-deadloop).
+    resilience_enabled: bool = True
 
 
 def build_agent_config(
@@ -200,6 +206,10 @@ def create_agent_from_config(config: AgentConfig) -> AgentGraph:
     middleware: list[Any] = []
     if config.guardian_enabled:
         middleware.append(build_guardian_middleware())
+    if config.resilience_enabled:
+        # LLM 瞬时故障自动重试；工具调用超过 run_limit 抛异常（防 ReAct 空转死循环）。
+        middleware.append(ModelRetryMiddleware(max_retries=2, on_failure="error"))
+        middleware.append(ToolCallLimitMiddleware(run_limit=15, exit_behavior="error"))
     if config.harness_security_enabled:
         middleware.append(build_harness_security_middleware())
     if config.offload_enabled:

@@ -125,11 +125,14 @@ class SessionManager:
         role: str,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        interrupted: bool | None = None,
     ) -> dict[str, Any]:
         record = self._read_session_file(session_id)
         message: dict[str, Any] = {"role": role, "content": content}
         if tool_calls:
             message["tool_calls"] = tool_calls
+        if interrupted:
+            message["interrupted"] = True
         record["messages"].append(message)
         self._write_session(record)
         return message

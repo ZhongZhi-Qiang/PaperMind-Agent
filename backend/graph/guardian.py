@@ -295,9 +295,25 @@ def _request_guardian_decision(user_text: str) -> GuardianOutput:
         {"role": "user", "content": user_text},
     ]
 
-    response = client.invoke(messages)
+    response = client.invoke(messages, config=_current_runnable_config())
     raw_content = response.content if hasattr(response, "content") else str(response)
     return _parse_guardian_json(raw_content)
+
+
+def _current_runnable_config() -> dict | None:
+    """Return the current LangGraph RunnableConfig (carries callbacks) when running
+    inside a graph/middleware context; otherwise None.
+
+    Used so the Guardian LLM call appears as a child observation of the agent trace in
+    Langfuse when a callback handler is attached. Fails safe: None == old behavior.
+    """
+    try:
+        from langgraph.config import get_config
+
+        cfg = get_config()
+        return cfg if cfg else None
+    except Exception:
+        return None
 
 
 def evaluate_guardian_input(user_text: str) -> GuardianRuntimeResult:

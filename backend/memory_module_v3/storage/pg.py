@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
 
+# Idempotent migrations for pre-existing tables: `CREATE TABLE IF NOT EXISTS` won't
+# add columns to a table that already exists, so when schema.sql gains new columns an
+# older database silently lags behind. These ALTERs are applied after the schema.sql
+# statements on every startup and are safe to re-run.
+_SCHEMA_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "memory_v3.pipeline_state",
+        "ADD COLUMN IF NOT EXISTS last_l3_at TIMESTAMPTZ,"
+        " ADD COLUMN IF NOT EXISTS last_l3_fact_count INT DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS pending_l2 BOOLEAN DEFAULT FALSE",
+    ),
+    (
+        "memory_v3.l1_facts",
+        "ADD COLUMN IF NOT EXISTS content_tsv TSVECTOR "
+        "GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED",
+    ),
+)
+
 _pool: Any | None = None  # psycopg_pool.ConnectionPool when available
 
 
@@ -107,6 +125,9 @@ def ensure_schema() -> None:
             with conn.cursor() as cur:
                 for statement in _split_statements(_SCHEMA_SQL):
                     cur.execute(statement)
+                # Migrate pre-existing tables that are missing newer columns.
+                for table, columns in _SCHEMA_MIGRATIONS:
+                    cur.execute(f"ALTER TABLE {table} {columns}")
             logger.info("memory_v3 schema initialized successfully")
         finally:
             put_connection(conn)

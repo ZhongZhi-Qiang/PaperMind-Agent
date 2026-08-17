@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from graph.context import build_request_context
 from graph.agent import agent_manager
@@ -19,9 +19,10 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
+    message: str = ""
     session_id: str
     stream: bool = True
+    resume: bool = False
 
 
 def _new_segment() -> dict[str, Any]:
@@ -37,11 +38,25 @@ def _is_recoverable_checkpointer_error(exc: Exception) -> bool:
     )
 
 
+def _friendly_agent_error(exc: Exception) -> str | None:
+    """Map agent-loop limit exceptions to friendly Chinese messages; None = keep default."""
+    from langgraph.errors import GraphRecursionError
+    from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+
+    if isinstance(exc, GraphRecursionError):
+        return "任务执行步骤过多，可能是 Agent 陷入重复循环。请把任务拆分成更小的步骤重试。"
+    if isinstance(exc, ToolCallLimitExceededError):
+        return "工具调用次数达到上限，Agent 可能在做无效尝试。请重新表述需求后重试。"
+    return None
+
+
 @router.post("/chat")
 async def chat(payload: ChatRequest):
     session_manager = agent_manager.session_manager
     if session_manager is None:
         raise HTTPException(status_code=503, detail="Agent manager is not initialized")
+    if not payload.resume and not payload.message.strip():
+        raise HTTPException(status_code=400, detail="message 不能为空")
 
     history_record = session_manager.load_session_record(payload.session_id)
     is_first_user_message = not any(
@@ -53,14 +68,24 @@ async def chat(payload: ChatRequest):
     history_for_agent: list[dict[str, Any]] = []
 
     async def event_generator():
-        retried = False
+        retried = False            # checkpointer 断连重试
+        resume_fallback = False    # resume → 带上下文重试
+        # 局部可变状态（resume 兜底会改这两个值；不重绑 `payload` 闭包变量，避免 UnboundLocalError）
+        is_resume = payload.resume
+        current_message = payload.message
         while True:
             segments: list[dict[str, Any]] = []
             current_segment = _new_segment()
             emitted_any_event = False
             try:
+                # 中途落盘：用户消息在调用 agent 前保存，任何失败都不丢用户输入。
+                # resume / 兜底重试时消息已存在或为空，不重复落盘。
+                if not is_resume and not resume_fallback:
+                    session_manager.save_message(payload.session_id, "user", current_message)
+
                 async for event in agent_manager.astream(
-                    payload.message, history_for_agent, context=request_context
+                    current_message, history_for_agent, context=request_context,
+                    resume=is_resume,
                 ):
                     emitted_any_event = True
                     event_type = event["type"]
@@ -88,7 +113,7 @@ async def chat(payload: ChatRequest):
                         if current_segment["content"].strip() or current_segment["tool_calls"]:
                             segments.append(current_segment)
 
-                        session_manager.save_message(payload.session_id, "user", payload.message)
+                        # 用户消息已在请求开头落盘，这里只落盘 assistant 回复
                         for segment in segments:
                             session_manager.save_message(
                                 payload.session_id,
@@ -101,8 +126,8 @@ async def chat(payload: ChatRequest):
                     yield sse_event(event_type, data)
 
                     if event_type == "done":
-                        if is_first_user_message:
-                            title = await agent_manager.generate_title(payload.message)
+                        if is_first_user_message and current_message:
+                            title = await agent_manager.generate_title(current_message)
                             session_manager.set_title(payload.session_id, title)
                             yield sse_event(
                                 "title",
@@ -110,6 +135,22 @@ async def chat(payload: ChatRequest):
                             )
                 return
             except Exception as exc:
+                # 中途失败：落盘已生成的部分回复（标记 interrupted），便于中断后恢复
+                if current_segment["content"].strip() or current_segment["tool_calls"]:
+                    session_manager.save_message(
+                        payload.session_id,
+                        "assistant",
+                        current_segment["content"],
+                        tool_calls=current_segment["tool_calls"] or None,
+                        interrupted=True,
+                    )
+                # resume 失败 → 回退为带上下文重试（agent 基于已保存的 checkpoint 状态继续）
+                if is_resume and not resume_fallback:
+                    resume_fallback = True
+                    logger.warning("resume failed, falling back to context retry: %s", exc)
+                    is_resume = False
+                    current_message = ""   # 兜底重试：无新消息，agent 基于 checkpoint 状态继续
+                    continue
                 if (
                     not retried
                     and not emitted_any_event
@@ -122,6 +163,10 @@ async def chat(payload: ChatRequest):
                     await reconnect_checkpointer_async()
                     continue
 
+                friendly = _friendly_agent_error(exc)
+                if friendly is not None:
+                    yield sse_event("error", {"error": friendly})
+                    return
                 print("[chat] error in event_generator", repr(exc))
                 traceback.print_exc()
                 yield sse_event("error", {"error": str(exc)})

@@ -212,7 +212,12 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
         config = build_llm_config_from_settings(settings, temperature=0.0, streaming=False)
         return get_llm(config)
 
-    def _do_review(self, state: AgentState[ResponseT]) -> dict[str, Any] | None:
+    def _do_review(
+        self,
+        state: AgentState[ResponseT],
+        callbacks: list | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         from config import get_settings
         settings = get_settings()
         if not settings.harness_review_enabled:
@@ -245,10 +250,13 @@ class HarnessReviewMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, R
 
         try:
             llm = self._get_llm()
-            response = llm.invoke([
-                {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt_text},
-            ])
+            response = llm.invoke(
+                [
+                    {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt_text},
+                ],
+                config={"callbacks": callbacks, "metadata": metadata or {}},
+            )
             raw_content = response.content if hasattr(response, "content") else str(response)
             review = _parse_review_json(raw_content)
             logger.info("Harness review completed: quality=%s", review.get("quality_score", "N/A"))
@@ -291,18 +299,27 @@ def build_harness_review_middleware(llm: Any = None) -> HarnessReviewMiddleware:
 _review_middleware: HarnessReviewMiddleware | None = None
 
 
-async def review_conversation(messages: list) -> dict[str, Any] | None:
+async def review_conversation(
+    messages: list,
+    callbacks: list | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Run a conversation quality review. Single review entry point.
 
     Wraps ``HarnessReviewMiddleware._do_review`` (which already handles the
     ``harness_review_enabled`` switch, short-response pruning, and JSON parsing)
     in a thread so it doesn't block the event loop.
+
+    ``callbacks``/``metadata`` are forwarded to the review LLM call's config so the
+    review can be traced (e.g. in Langfuse as its own linked trace).
     """
     global _review_middleware
     if _review_middleware is None:
         _review_middleware = HarnessReviewMiddleware()
     state: dict[str, Any] = {"messages": messages}
-    return await asyncio.to_thread(_review_middleware._do_review, state)
+    return await asyncio.to_thread(
+        _review_middleware._do_review, state, callbacks, metadata,
+    )
 
 
 def persist_review(

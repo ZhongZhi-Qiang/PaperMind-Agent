@@ -21,10 +21,11 @@ def _base_config(**overrides: Any) -> AgentConfig:
         "llm": object(),
         "tools": [],
         "system_prompt": "",
-        # Disable security/review middlewares so these tests focus on the
+        # Disable security/review/resilience middlewares so these tests focus on the
         # guardian-before-summarization ordering.
         "harness_security_enabled": False,
         "harness_review_enabled": False,
+        "resilience_enabled": False,
     }
     defaults.update(overrides)
     return AgentConfig(**defaults)
@@ -99,3 +100,33 @@ class TestAgentGuardianIntegration:
         middleware = list(captured["middleware"])
         assert len(middleware) == 1
         assert middleware[0].__class__.__name__ == "_FakeSummarizationMiddleware"
+
+    def test_resilience_middleware_added_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_create_agent(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr("graph.agent_factory.create_agent", _fake_create_agent)
+
+        create_agent_from_config(_base_config(
+            guardian_enabled=False, use_summarization=False, resilience_enabled=True,
+        ))
+
+        names = [m.__class__.__name__ for m in captured["middleware"]]
+        assert "ModelRetryMiddleware" in names
+        assert "ToolCallLimitMiddleware" in names
+
+    def test_resilience_middleware_skipped_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_create_agent(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr("graph.agent_factory.create_agent", _fake_create_agent)
+
+        create_agent_from_config(_base_config(guardian_enabled=False, use_summarization=False))
+
+        assert list(captured["middleware"]) == []

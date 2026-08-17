@@ -7,21 +7,25 @@ import { RetrievalCard } from "@/components/chat/RetrievalCard";
 import { SourcesCard } from "@/components/chat/SourcesCard";
 import { ThoughtChain } from "@/components/chat/ThoughtChain";
 import type { EvidenceSource, RetrievalResult, ToolCall } from "@/lib/api";
+import { useAppStore } from "@/lib/store";
 
 export function ChatMessage({
   role,
   content,
   toolCalls,
   retrievals,
-  sources
+  sources,
+  interrupted
 }: {
   role: "user" | "assistant";
   content: string;
   toolCalls: ToolCall[];
   retrievals: RetrievalResult[];
   sources: EvidenceSource[];
+  interrupted?: boolean;
 }) {
   const isUser = role === "user";
+  const { resumeGeneration } = useAppStore();
 
   // Strip any tool output that leaked into the displayed content
   let displayContent = content;
@@ -63,6 +67,17 @@ export function ChatMessage({
       )}
       {!isUser && (!displayContent || displayContent.trim() === "") && !toolCalls.length && (
         <div className="text-[var(--color-ink-soft)]">正在思考...</div>
+      )}
+      {!isUser && interrupted && (
+        <div className="mt-3 flex items-center gap-3">
+          <span className="text-sm font-medium text-amber-600">⚠ 回答被中断</span>
+          <button
+            onClick={() => void resumeGeneration()}
+            className="rounded-full border border-[var(--color-line)] px-3 py-1 text-sm text-ocean transition-colors hover:bg-[rgba(15,139,141,0.1)]"
+          >
+            继续生成
+          </button>
+        </div>
       )}
     </article>
   );

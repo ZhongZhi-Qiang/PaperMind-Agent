@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -10,8 +11,11 @@ if sys.platform == "win32":
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from api.chat import router as chat_router
 from api.compress import router as compress_router
@@ -66,3 +70,14 @@ app.include_router(digest_router, prefix="/api", tags=["digest"])
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Global fallback: any uncaught exception returns structured JSON, not a bare 500.
+    `/api/chat` errors are handled inside its SSE event_generator, so they don't reach here."""
+    logger.error("Unhandled error on %s: %s", request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal", "detail": str(exc)},
+    )

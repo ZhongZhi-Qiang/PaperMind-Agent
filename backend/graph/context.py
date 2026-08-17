@@ -82,3 +82,8 @@ def build_request_context(
     if include_langfuse:
         ctx = ctx.with_langfuse()
     return ctx
+
+
+# Public alias so other modules (agent.py, harness_review.py) can reuse the Langfuse
+# callback builder without depending on a private name.
+build_langfuse_callbacks = _build_langfuse_callbacks

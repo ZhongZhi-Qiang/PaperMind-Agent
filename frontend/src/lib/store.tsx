@@ -30,6 +30,7 @@ type Message = {
   toolCalls: ToolCall[];
   retrievals: RetrievalResult[];
   sources: EvidenceSource[];
+  interrupted?: boolean;
 };
 
 type TokenStats = {
@@ -55,6 +56,7 @@ type AppStore = {
   createNewSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   sendMessage: (value: string, file?: File) => Promise<void>;
+  resumeGeneration: () => Promise<void>;
   toggleRagMode: () => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
@@ -351,8 +353,101 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (event === "error") {
               patchAssistant((message) => ({
                 ...message,
+                interrupted: true,
                 content:
                   message.content || `请求失败: ${String(data.error ?? "unknown error")}`
+              }));
+            }
+          }
+        }
+      );
+    } finally {
+      setIsStreaming(false);
+      await refreshSessions();
+      await refreshSessionDetails(sessionId);
+    }
+  }
+
+  async function resumeGeneration() {
+    if (isStreaming) return;
+    const sessionId = await ensureSession();
+    const assistantMessage: Message = {
+      id: makeId(),
+      role: "assistant",
+      content: "",
+      toolCalls: [],
+      retrievals: [],
+      sources: []
+    };
+    setMessages((prev) => [...prev, assistantMessage]);
+    setIsStreaming(true);
+
+    let activeAssistantId = assistantMessage.id;
+    const patchAssistant = (updater: (message: Message) => Message) => {
+      setMessages((prev) =>
+        prev.map((message) => (message.id === activeAssistantId ? updater(message) : message))
+      );
+    };
+
+    try {
+      await streamChat(
+        { message: "", session_id: sessionId, resume: true },
+        {
+          onEvent(event, data) {
+            if (event === "evidence") {
+              patchAssistant((message) => ({
+                ...message,
+                sources: (data.sources as EvidenceSource[]) ?? []
+              }));
+              return;
+            }
+            if (event === "token") {
+              patchAssistant((message) => ({
+                ...message,
+                content: `${message.content}${String(data.content ?? "")}`
+              }));
+              return;
+            }
+            if (event === "tool_start") {
+              patchAssistant((message) => ({
+                ...message,
+                toolCalls: [
+                  ...message.toolCalls,
+                  { tool: String(data.tool ?? "tool"), input: String(data.input ?? ""), output: "" }
+                ]
+              }));
+              return;
+            }
+            if (event === "tool_end") {
+              patchAssistant((message) => {
+                const updated = message.toolCalls.map((t, i, list) =>
+                  i === list.length - 1 ? { ...t, output: String(data.output ?? "") } : t
+                );
+                return { ...message, toolCalls: updated };
+              });
+              return;
+            }
+            if (event === "new_response") {
+              const next: Message = {
+                id: makeId(), role: "assistant", content: "",
+                toolCalls: [], retrievals: [], sources: []
+              };
+              activeAssistantId = next.id;
+              setMessages((prev) => [...prev, next]);
+              return;
+            }
+            if (event === "done") {
+              const finalContent = String(data.content ?? "");
+              patchAssistant((message) =>
+                message.content ? message : { ...message, content: finalContent }
+              );
+              return;
+            }
+            if (event === "error") {
+              patchAssistant((message) => ({
+                ...message,
+                interrupted: true,
+                content: message.content || `续跑失败: ${String(data.error ?? "unknown error")}`
               }));
             }
           }
@@ -472,6 +567,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     createNewSession,
     selectSession,
     sendMessage,
+    resumeGeneration,
     toggleRagMode,
     renameCurrentSession,
     removeSession,
