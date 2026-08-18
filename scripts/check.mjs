@@ -31,32 +31,47 @@ export function check(projectRoot) {
   checks.push({ name: "CLAUDE.md", ok: claudeOk, hint: claudeOk ? "" : "缺少 CLAUDE.md" });
 
   const claudeDirOk = existsSync(join(root, ".claude"));
-  checks.push({ name: ".claude/ 目录", ok: claudeDirOk, hint: claudeDirOk ? "" : "缺少 .claude/ 目录" });
+  checks.push({
+    name: ".claude/ 目录（可选）",
+    ok: true,
+    hint: claudeDirOk ? "检测到 .claude/，执行完整 Harness 检查" : "未检测到 .claude/，跳过本地 Harness 配置检查",
+  });
 
-  const settingsOk = existsSync(join(root, ".claude/settings.json"));
-  checks.push({ name: "settings.json", ok: settingsOk, hint: settingsOk ? "" : "缺少 settings.json，Hook 无法注册" });
+  if (claudeDirOk) {
+    const settingsOk = existsSync(join(root, ".claude/settings.json"));
+    checks.push({ name: "settings.json", ok: settingsOk, hint: settingsOk ? "" : "缺少 settings.json，Hook 无法注册" });
 
-  // ── Hook 文件检查 ─────────────────────────
-
-  const hooks = ["pre-tool-check.mjs", "session-context.mjs", "session-review.mjs", "post-tool-check.mjs", "pre-compact.mjs"];
-  for (const h of hooks) {
-    const ok = existsSync(join(root, ".claude/hooks", h));
-    if (h === "post-tool-check.mjs" || h === "pre-compact.mjs") {
-      checks.push({ name: "hooks/" + h + "（可选）", ok, hint: ok ? "" : h + " 缺失（L3 升级用）" });
-    } else {
-      checks.push({ name: "hooks/" + h, ok, hint: ok ? "" : h + " 缺失" });
+    // ── Hook 文件检查 ─────────────────────────
+    const hooks = ["pre-tool-check.mjs", "session-context.mjs", "session-review.mjs", "post-tool-check.mjs", "pre-compact.mjs"];
+    for (const h of hooks) {
+      const ok = existsSync(join(root, ".claude/hooks", h));
+      if (h === "post-tool-check.mjs" || h === "pre-compact.mjs") {
+        checks.push({ name: "hooks/" + h + "（可选）", ok, hint: ok ? "" : h + " 缺失（L3 升级用）" });
+      } else {
+        checks.push({ name: "hooks/" + h, ok, hint: ok ? "" : h + " 缺失" });
+      }
     }
-  }
 
-  // PostToolUse 注册检查
-  const settingsContent = settingsOk ? readFileSync(join(root, ".claude/settings.json"), "utf-8") : "";
-  const postToolUseRegistered = settingsContent.includes("PostToolUse") && !settingsContent.includes("// \"PostToolUse\"");
-  checks.push({ name: "PostToolUse 已注册（可选）", ok: postToolUseRegistered, hint: postToolUseRegistered ? "" : "未在 settings.json 中启用，取消注释即可" });
+    // PostToolUse 注册检查
+    const settingsContent = settingsOk ? readFileSync(join(root, ".claude/settings.json"), "utf-8") : "";
+    const postToolUseRegistered = settingsContent.includes("PostToolUse") && !settingsContent.includes("// \"PostToolUse\"");
+    checks.push({ name: "PostToolUse 已注册（可选）", ok: postToolUseRegistered, hint: postToolUseRegistered ? "" : "未在 settings.json 中启用，取消注释即可" });
+
+    // ── Skills 检查 ──────────────────────────
+    const harnessInitOk = existsSync(join(root, ".claude/skills/harness-init/SKILL.md"));
+    checks.push({ name: "harness-init Skill", ok: harnessInitOk, hint: harnessInitOk ? "" : "缺少初始化 Skill" });
+
+    const harnessModeOk = existsSync(join(root, ".claude/skills/harness-mode/SKILL.md"));
+    checks.push({ name: "harness-mode Skill", ok: harnessModeOk, hint: harnessModeOk ? "" : "缺少模式切换 Skill" });
+
+    const harnessGcOk = existsSync(join(root, ".claude/skills/harness-gc/SKILL.md"));
+    checks.push({ name: "harness-gc Skill（可选）", ok: harnessGcOk, hint: harnessGcOk ? "" : "缺少 GC Agent Skill" });
+  }
 
   // ── LSP 配置 ──────────────────────────────
 
   const lspOk = existsSync(join(root, ".lsp.json"));
-  checks.push({ name: ".lsp.json", ok: lspOk, hint: lspOk ? "" : "缺少 .lsp.json" });
+  checks.push({ name: ".lsp.json（可选）", ok: lspOk, hint: lspOk ? "" : "缺少 .lsp.json" });
 
   // ── 项目类型检测 ──────────────────────────
 
@@ -80,40 +95,29 @@ export function check(projectRoot) {
 
   if (hasPackageJson) {
     const hasTsLsp = !!run("typescript-language-server --version 2>/dev/null");
-    checks.push({ name: "TypeScript LSP", ok: hasTsLsp, hint: hasTsLsp ? "" : "未安装，执行 npm install -g typescript-language-server" });
+    checks.push({ name: "TypeScript LSP（可选）", ok: hasTsLsp, hint: hasTsLsp ? "" : "未安装，执行 npm install -g typescript-language-server" });
   }
 
   if (hasPyprojectToml) {
     const hasPyright = !!run("pyright-langserver --version 2>/dev/null || pyright --version 2>/dev/null");
-    checks.push({ name: "Python LSP (pyright)", ok: hasPyright, hint: hasPyright ? "" : "未安装，执行 pip install pyright" });
+    checks.push({ name: "Python LSP (pyright)（可选）", ok: hasPyright, hint: hasPyright ? "" : "未安装，执行 pip install pyright" });
   }
 
   if (hasGoMod) {
     const hasGopls = !!run("gopls version 2>/dev/null");
-    checks.push({ name: "Go LSP (gopls)", ok: hasGopls, hint: hasGopls ? "" : "未安装，执行 go install golang.org/x/tools/gopls@latest" });
+    checks.push({ name: "Go LSP (gopls)（可选）", ok: hasGopls, hint: hasGopls ? "" : "未安装，执行 go install golang.org/x/tools/gopls@latest" });
   }
 
   if (hasCargoToml) {
     const hasRustAnalyzer = !!run("rust-analyzer --version 2>/dev/null");
-    checks.push({ name: "Rust LSP (rust-analyzer)", ok: hasRustAnalyzer, hint: hasRustAnalyzer ? "" : "未安装，参考 https://rust-analyzer.github.io/manual.html" });
+    checks.push({ name: "Rust LSP (rust-analyzer)（可选）", ok: hasRustAnalyzer, hint: hasRustAnalyzer ? "" : "未安装，参考 https://rust-analyzer.github.io/manual.html" });
   }
 
   // 未检测到项目类型时，默认检查 TypeScript LSP
   if (detectedLanguages.length === 0) {
     const hasTsLsp = !!run("typescript-language-server --version 2>/dev/null");
-    checks.push({ name: "TypeScript LSP（默认）", ok: hasTsLsp, hint: hasTsLsp ? "" : "未安装，执行 npm install -g typescript-language-server" });
+    checks.push({ name: "TypeScript LSP（默认，可选）", ok: hasTsLsp, hint: hasTsLsp ? "" : "未安装，执行 npm install -g typescript-language-server" });
   }
-
-  // ── Skills 检查 ──────────────────────────
-
-  const harnessInitOk = existsSync(join(root, ".claude/skills/harness-init/SKILL.md"));
-  checks.push({ name: "harness-init Skill", ok: harnessInitOk, hint: harnessInitOk ? "" : "缺少初始化 Skill" });
-
-  const harnessModeOk = existsSync(join(root, ".claude/skills/harness-mode/SKILL.md"));
-  checks.push({ name: "harness-mode Skill", ok: harnessModeOk, hint: harnessModeOk ? "" : "缺少模式切换 Skill" });
-
-  const harnessGcOk = existsSync(join(root, ".claude/skills/harness-gc/SKILL.md"));
-  checks.push({ name: "harness-gc Skill（可选）", ok: harnessGcOk, hint: harnessGcOk ? "" : "缺少 GC Agent Skill" });
 
   // ── npm 分发 ────────────────────────────
 

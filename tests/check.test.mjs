@@ -31,7 +31,7 @@ describe("check.mjs: 核心文件检查", () => {
     });
     const result = check(projectRoot);
 
-    const coreNames = ["CLAUDE.md", ".claude/ 目录", "settings.json"];
+    const coreNames = ["CLAUDE.md", ".claude/ 目录（可选）", "settings.json"];
     for (const name of coreNames) {
       const c = result.checks.find(c => c.name === name);
       expect(c.ok).toBe(true);
@@ -50,10 +50,25 @@ describe("check.mjs: 核心文件检查", () => {
   it("缺少 settings.json → 失败", () => {
     const { projectRoot, cleanup } = createVirtualProject({
       "CLAUDE.md": Fixtures.completeClaudeMd,
+      ".claude/": null,
     });
     const result = check(projectRoot);
     const c = result.checks.find(c => c.name === "settings.json");
     expect(c.ok).toBe(false);
+    cleanup();
+  });
+
+  it("仓库未包含 .claude 目录 → 不计入 critical", () => {
+    const { projectRoot, cleanup } = createVirtualProject({
+      "CLAUDE.md": Fixtures.completeClaudeMd,
+      "package.json": "{}",
+      "pyproject.toml": "[tool]",
+      "scripts/init.mjs": "// stub",
+    });
+    const result = check(projectRoot);
+    const c = result.checks.find(c => c.name === ".claude/ 目录（可选）");
+    expect(c.ok).toBe(true);
+    expect(result.criticalFails).toBe(0);
     cleanup();
   });
 });
@@ -93,7 +108,6 @@ describe("check.mjs: Hook 检查", () => {
     const { projectRoot, cleanup } = createVirtualProject({
       "CLAUDE.md": Fixtures.completeClaudeMd,
       ".claude/settings.json": Fixtures.minimalSettingsJson,
-      ".lsp.json": Fixtures.minimalLspJson,
       ".claude/hooks/pre-tool-check.mjs": "// stub",
       ".claude/hooks/session-context.mjs": "// stub",
       ".claude/hooks/session-review.mjs": "// stub",
@@ -108,9 +122,6 @@ describe("check.mjs: Hook 检查", () => {
     const result = check(projectRoot);
     const postTool = result.checks.find(c => c.name === "hooks/post-tool-check.mjs（可选）");
     expect(postTool.ok).toBe(false);
-    // post-tool-check and pre-compact are genuinely optional (L3+ features)
-    // Note: their names in check.mjs don't include "（可选）" — this is a known
-    // documentation inconsistency fixed in Phase 4
     const optionalMissing = result.checks.filter(c =>
       !c.ok && (c.name.includes("post-tool-check") || c.name.includes("pre-compact"))
     );

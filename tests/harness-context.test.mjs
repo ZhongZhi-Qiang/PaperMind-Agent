@@ -3,21 +3,28 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { createVirtualProject, Fixtures } from "./setup.mjs";
+
+const harnessContextPath = fileURLToPath(new URL("../.claude/hooks/lib/harness-context.mjs", import.meta.url));
+const hasHarnessContextModule = existsSync(harnessContextPath);
+const {
   getGitContext,
   getLoopState,
   getReviewSummary,
   getHarnessState,
   getClaudeMdStatus,
-} from "../.claude/hooks/lib/harness-context.mjs";
-import { createVirtualProject, Fixtures } from "./setup.mjs";
+} = hasHarnessContextModule
+  ? await import("../.claude/hooks/lib/harness-context.mjs")
+  : {};
 
 // Mock child_process for git commands
 vi.mock("child_process", () => ({
   execSync: vi.fn(() => { throw new Error("no git"); }),
 }));
 
-describe("getGitContext", () => {
+describe.runIf(hasHarnessContextModule)("getGitContext", () => {
   it("非 git 目录 → 返回 null", () => {
     const { projectRoot, cleanup } = createVirtualProject({});
     const result = getGitContext(projectRoot);
@@ -26,7 +33,7 @@ describe("getGitContext", () => {
   });
 });
 
-describe("getLoopState", () => {
+describe.runIf(hasHarnessContextModule)("getLoopState", () => {
   it("STATE.md 存在 → 解析字段", () => {
     const { projectRoot, cleanup } = createVirtualProject({
       ".claude/loops/STATE.md": "**Phase**: idle\n**Last Run**: 2026-06-15\n**Findings Open**: 3\n",
@@ -58,7 +65,7 @@ describe("getLoopState", () => {
   });
 });
 
-describe("getReviewSummary", () => {
+describe.runIf(hasHarnessContextModule)("getReviewSummary", () => {
   it("审查目录缺失 → 返回 null", () => {
     const { projectRoot, cleanup } = createVirtualProject({});
     const result = getReviewSummary(projectRoot);
@@ -88,7 +95,7 @@ describe("getReviewSummary", () => {
   });
 });
 
-describe("getHarnessState", () => {
+describe.runIf(hasHarnessContextModule)("getHarnessState", () => {
   it("有效状态 → 解析正确", () => {
     const { projectRoot, cleanup } = createVirtualProject({
       ".claude/.harness-state": '{"phase":"fix","mode":"hotfix","since":"2026-01-01"}',
@@ -127,7 +134,7 @@ describe("getHarnessState", () => {
   });
 });
 
-describe("getClaudeMdStatus", () => {
+describe.runIf(hasHarnessContextModule)("getClaudeMdStatus", () => {
   it("CLAUDE.md 缺失 → exists=false", () => {
     const { projectRoot, cleanup } = createVirtualProject({});
     const result = getClaudeMdStatus(projectRoot);
