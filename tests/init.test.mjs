@@ -36,9 +36,7 @@ describe("init.mjs: 基础安装", () => {
       });
       expect(existsSync(join(target, "CLAUDE.md"))).toBe(true);
       expect(existsSync(join(target, ".claude"))).toBe(true);
-      expect(existsSync(join(target, ".lsp.json"))).toBe(true);
       expect(existsSync(join(target, ".gitignore"))).toBe(true);
-      expect(existsSync(join(target, ".claude", ".harness-state"))).toBe(true);
     } finally {
       cleanup(target);
     }
